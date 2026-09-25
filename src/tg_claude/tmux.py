@@ -59,16 +59,16 @@ async def type_text(name: str, text: str) -> None:
     """Набирает текст как с клавиатуры (без Enter в конце).
 
     Не используем paste-buffer: вставку Claude помечает как <pasted_content> и относится к ней
-    как к недоверенному тексту. Перенос строки в TUI Claude — это «\\» + Enter.
+    как к недоверенному тексту. По той же причине печатаем порциями по 200 символов —
+    большой кусок за раз TUI тоже принимает за вставку. Перенос строки — Alt+Enter.
     """
     lines = text.replace("\r\n", "\n").split("\n")
     for n, line in enumerate(lines):
-        last = n == len(lines) - 1
-        piece = line if last else line + "\\"
-        for i in range(0, len(piece), 1000):
-            await _run("send-keys", "-t", f"={name}:", "-l", piece[i : i + 1000])
-        if not last:
-            await _run("send-keys", "-t", f"={name}:", "Enter")
+        for i in range(0, len(line), 200):
+            await _run("send-keys", "-t", f"={name}:", "-l", line[i : i + 200])
+            await asyncio.sleep(0.02)
+        if n < len(lines) - 1:
+            await _run("send-keys", "-t", f"={name}:", "M-Enter")
 
 
 async def send_keys(name: str, *keys: str) -> None:
