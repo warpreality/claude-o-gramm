@@ -1,0 +1,17 @@
+[Unit]
+Description=tg-claude: Telegram <-> Claude Code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/tg-claude
+ExecStart=%h/.local/bin/uv run --frozen tg-claude --env %h/tg-claude/.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=5
+# сессии Claude живут в tmux и не должны умирать при рестарте бота
+KillMode=process
+
+[Install]
+WantedBy=default.target
