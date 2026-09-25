@@ -53,7 +53,18 @@ Telegram ⇄ aiogram-бот ──tmux send-keys──▶ claude (TUI в tmux, �
 
 ## Автозапуск (systemd, Linux)
 
-См. `deploy/tg-claude.service` — user-сервис: `systemctl --user enable --now tg-claude`, плюс `loginctl enable-linger $USER`.
+Проект клонируется в `~/tg-claude`, рядом кладётся `.env`, затем:
+
+```bash
+cp deploy/*.service deploy/*.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tg-claude tg-claude-update.timer
+loginctl enable-linger $USER   # чтобы сервисы жили без входа в систему
+```
+
+**Автообновление:** таймер `tg-claude-update.timer` каждые 5 минут запускает `deploy/update.sh` —
+если в `origin/main` появились коммиты, он подтягивает их, ставит зависимости и перезапускает бота
+(сессии Claude в tmux при этом не теряются). Лог: `journalctl --user -u tg-claude-update`.
 
 ## Тесты
 

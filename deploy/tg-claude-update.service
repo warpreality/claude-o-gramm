@@ -1,0 +1,6 @@
+[Unit]
+Description=tg-claude: проверка обновлений в git
+
+[Service]
+Type=oneshot
+ExecStart=%h/tg-claude/deploy/update.sh
