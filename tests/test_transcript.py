@@ -36,3 +36,10 @@ def test_input_text():
     assert _input_text("foo\n❯ Try \"fix lint errors\"\n──") == ""
     assert _input_text("❯ \n") == ""
     assert _input_text("❯ застрявший текст\n  продолжение") == "застрявший текст"
+
+
+def test_titles():
+    ev = to_events({"type": "ai-title", "aiTitle": "GitLab authorization"}, "/")
+    assert ev[0].kind == "title" and ev[0].text == "GitLab authorization" and not ev[0].custom
+    ev = to_events({"type": "custom-title", "customTitle": "Мой тред"}, "/")
+    assert ev[0].custom

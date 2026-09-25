@@ -360,6 +360,8 @@ class SessionManager:
         elif ev.kind == "tool":
             live.activity.append(ev.text)
             live.activity_dirty = True
+        elif ev.kind == "title":
+            await self._rename_topic(live, ev.text, ev.custom)
         elif ev.kind == "local":
             await tg.send(self.bot, rec.chat_id, rec.thread_id, ev.text)
             self._set_busy(live, False)
@@ -376,6 +378,21 @@ class SessionManager:
                     await tg.send(self.bot, rec.chat_id, rec.thread_id, f"🖥 <i>из терминала:</i>\n{chunk}")
         else:
             await tg.send(self.bot, rec.chat_id, rec.thread_id, ev.text)
+
+    async def _rename_topic(self, live: Live, title: str, custom: bool) -> None:
+        """Называем тред в Telegram по заголовку сессии Claude."""
+        rec = live.rec
+        title = " ".join(title.split())
+        if not rec.thread_id or not title or title == rec.topic_title or (rec.custom_title and not custom):
+            return
+        name = f"{rec.project} · {title}" if rec.project else f"💬 {title}"
+        try:
+            await self.bot.edit_forum_topic(rec.chat_id, rec.thread_id, name=name[:128])
+        except Exception as e:
+            log.warning("не удалось переименовать тред %s: %s", rec.key, e)
+            return
+        rec.topic_title, rec.custom_title = title, rec.custom_title or custom
+        self.store.save()
 
     async def _flush_activity(self, live: Live, force: bool = False) -> None:
         if not live.activity_dirty:

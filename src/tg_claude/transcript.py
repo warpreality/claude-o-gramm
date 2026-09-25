@@ -25,8 +25,9 @@ _ICONS = {
 
 @dataclass
 class Event:
-    kind: str  # "text" | "tool" | "user" | "info" | "local" (вывод локальной команды вроде /model)
-    text: str  # для text — markdown, для остальных — готовый HTML
+    kind: str  # "text" | "tool" | "user" | "info" | "title" | "local" (вывод локальной команды вроде /model)
+    text: str  # для text — markdown, для title — простой текст, для остальных — готовый HTML
+    custom: bool = False  # для title: задан пользователем через /rename
 
 
 def find_transcript(session_id: str) -> Path | None:
@@ -63,6 +64,10 @@ def to_events(rec: dict, cwd: str) -> list[Event]:
     t = rec.get("type")
     if t == "system":
         return _system_events(rec)
+    if t == "custom-title" and rec.get("customTitle"):  # пользователь переименовал сессию (/rename)
+        return [Event("title", rec["customTitle"], custom=True)]
+    if t == "ai-title" and rec.get("aiTitle"):  # заголовок, который Claude придумал сам
+        return [Event("title", rec["aiTitle"])]
     msg = rec.get("message") or {}
     content = msg.get("content")
     if t == "user":
