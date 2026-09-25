@@ -18,7 +18,7 @@ class SessionRec:
     tmux: str
     offset: int = 0  # сколько байт транскрипта уже отправили в Telegram
     pending_reactions: list[int] = field(default_factory=list)  # сообщения, ждущие 👍
-    topic_title: str | None = None  # заголовок Claude, под которым уже назван тред
+    topic_title: str | None = None  # заголовок Claude (как он его написал), под которым уже назван тред
     custom_title: bool = False  # заголовок задан через /rename — ai-title его не перетирает
 
     @property

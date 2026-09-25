@@ -75,5 +75,6 @@ async def send_keys(name: str, *keys: str) -> None:
     await _run("send-keys", "-t", f"={name}:", *keys)
 
 
-async def capture(name: str) -> str:
-    return await _run("capture-pane", "-p", "-t", f"={name}:", check=False)
+async def capture(name: str, colors: bool = False) -> str:
+    args = ["capture-pane", "-p", "-t", f"={name}:"] + (["-e"] if colors else [])
+    return await _run(*args, check=False)

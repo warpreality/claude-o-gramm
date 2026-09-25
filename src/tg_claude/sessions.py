@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shlex
 import sys
@@ -43,6 +44,7 @@ CHAT_PROMPT = (
     " Сейчас режим «без проекта»: доступны только веб-поиск, загрузка страниц и чтение присланных файлов; "
     "доступа к проектам и командам нет."
 )
+_CYRILLIC = re.compile("[а-яё]", re.I)
 _READY = ("for shortcuts", "esc to interrupt", "? for", "shift+tab to cycle", "auto mode on", "accept edits on", "plan mode on")
 
 
@@ -138,7 +140,7 @@ class SessionManager:
         await tmux.send_keys(name, "Enter")
         for _ in range(2):
             await asyncio.sleep(1.5)
-            if not _input_text(await tmux.capture(name)):
+            if not _input_text(await tmux.capture(name, colors=True)):
                 break
             log.warning("сообщение осталось в поле ввода %s — жму Enter ещё раз", name)
             await tmux.send_keys(name, "Enter")
@@ -251,6 +253,7 @@ class SessionManager:
 
         settings = {
             "enableAllProjectMcpServers": True,  # иначе при старте всплывает диалог выбора MCP
+            "promptSuggestionEnabled": False,
             "hooks": {
                 "PermissionRequest": [{"matcher": "*", "hooks": hook("PermissionRequest", 86400)}],
                 "PreToolUse": [{"matcher": "AskUserQuestion", "hooks": hook("AskUserQuestion", 86400)}],
@@ -265,15 +268,15 @@ class SessionManager:
         args = [self.cfg.claude_bin]
         args += ["--resume", rec.session_id] if resume else ["--session-id", rec.session_id]
         args += ["--permission-mode", self.cfg.permission_mode, "--settings", str(self._settings_file(rec))]
-        # серые подсказки следующего сообщения в поле ввода нам не нужны (и мешают проверке ввода)
-        args += ["--prompt-suggestions", "false"]
+        # серые подсказки следующего сообщения в поле ввода нам не нужны (и мешают проверке ввода);
+        # флаг --prompt-suggestions в интерактивном режиме не срабатывает, поэтому env + настройка
         system = SYSTEM_PROMPT
         if rec.project is None:
             args += ["--restricted", "--tools", CHAT_TOOLS, "--strict-mcp-config", "--disable-slash-commands"]
             system += CHAT_PROMPT
         args += ["--append-system-prompt", system, *self.cfg.extra_args]
         unset = " ".join(f"-u {v}" for v in _UNSET_VARS)
-        return f"cd {shlex.quote(rec.cwd)} && exec env {unset} {shlex.join(args)}"
+        return f"cd {shlex.quote(rec.cwd)} && exec env {unset} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false {shlex.join(args)}"
 
     async def _launch(self, live: Live, resume: bool, prompt: str | None) -> None:
         rec = live.rec
@@ -382,17 +385,41 @@ class SessionManager:
     async def _rename_topic(self, live: Live, title: str, custom: bool) -> None:
         """Называем тред в Telegram по заголовку сессии Claude."""
         rec = live.rec
-        title = " ".join(title.split())
-        if not rec.thread_id or not title or title == rec.topic_title or (rec.custom_title and not custom):
+        source = " ".join(title.split())
+        if not rec.thread_id or not source or source == rec.topic_title or (rec.custom_title and not custom):
             return
+        # Claude иногда придумывает заголовок по-английски — переводим (свой /rename не трогаем)
+        title = source if custom or _CYRILLIC.search(source) else await self._translate(source)
         name = f"{rec.project} · {title}" if rec.project else f"💬 {title}"
         try:
             await self.bot.edit_forum_topic(rec.chat_id, rec.thread_id, name=name[:128])
         except Exception as e:
             log.warning("не удалось переименовать тред %s: %s", rec.key, e)
             return
-        rec.topic_title, rec.custom_title = title, rec.custom_title or custom
+        rec.topic_title, rec.custom_title = source, rec.custom_title or custom
         self.store.save()
+
+    async def _translate(self, title: str) -> str:
+        """Перевод заголовка на русский отдельным коротким вызовом claude -p (haiku)."""
+        prompt = (
+            "Переведи заголовок на русский язык. Названия продуктов и технологий (GitLab, MCP, Docker…) "
+            f"оставь как есть. Ответь только переводом, без кавычек и пояснений.\n\nЗаголовок: {title}"
+        )
+        env = {k: v for k, v in os.environ.items() if k not in _UNSET_VARS}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.cfg.claude_bin, "-p", "--model", "haiku", "--tools", "", "--strict-mcp-config",
+                "--no-session-persistence", prompt,
+                cwd=str(self.cfg.state_dir), env=env,
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), 90)
+        except (OSError, TimeoutError) as e:
+            log.warning("не удалось перевести заголовок %r: %s", title, e)
+            return title
+        lines = out.decode().strip().splitlines()
+        text = lines[0].strip().strip("«»\"'").strip() if lines else ""
+        return text[:100] if proc.returncode == 0 and _CYRILLIC.search(text) else title
 
     async def _flush_activity(self, live: Live, force: bool = False) -> None:
         if not live.activity_dirty:
@@ -432,12 +459,25 @@ class SessionManager:
                     await tg.send(self.bot, rec.chat_id, rec.thread_id, "⚠️ <i>Сессия Claude завершилась. Следующее сообщение запустит её снова.</i>")
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
 def _input_text(screen: str) -> str:
-    """Текст в поле ввода TUI (пусто, если там только подсказка)."""
+    """Текст в поле ввода TUI по снимку с цветами (capture-pane -e).
+
+    Пусто, если там плейсхолдер «Try …» или серая подсказка следующего сообщения —
+    обе рисуются бледным (ESC[2m), а набранный текст — обычным цветом.
+    """
     for line in reversed(screen.splitlines()):
-        if line.startswith("❯"):
-            text = line[1:].strip()
-            return "" if text.startswith('Try "') else text
+        plain = _ANSI.sub("", line)
+        if not plain.startswith("❯"):
+            continue
+        rest = line[line.index("❯") + 1 :].lstrip(" \xa0")
+        rest = re.sub(r"^(\x1b\[(?:0|39|22)?m)+", "", rest).lstrip(" \xa0")
+        if rest.startswith("\x1b[2m"):
+            return ""
+        text = _ANSI.sub("", rest).strip()
+        return "" if text.startswith('Try "') else text
     return ""
 
 

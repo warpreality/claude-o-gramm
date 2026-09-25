@@ -36,6 +36,9 @@ def test_input_text():
     assert _input_text("foo\n❯ Try \"fix lint errors\"\n──") == ""
     assert _input_text("❯ \n") == ""
     assert _input_text("❯ застрявший текст\n  продолжение") == "застрявший текст"
+    # снимки реального экрана (capture-pane -e): серая подсказка и набранный текст
+    assert _input_text("\x1b[39m❯\xa0\x1b[2mпокажи мои открытые MR\x1b[0m") == ""
+    assert _input_text("\x1b[39m❯\xa0настоящий текст") == "настоящий текст"
 
 
 def test_titles():
