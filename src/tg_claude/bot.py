@@ -29,6 +29,7 @@ HELP = (
     "/status — что за сессия и как подключиться к ней с компьютера\n"
     "/esc — прервать текущий ответ\n"
     "/stop — закрыть сессию (следующее сообщение предложит выбрать проект заново)\n"
+    "/project — выбрать или сменить проект в этом треде\n"
     "/new — создать новый тред\n\n"
     "Остальные команды со слешем (например /compact) уходят прямо в Claude."
 )
@@ -58,6 +59,7 @@ class BotApp:
         router.message(CommandStart())(self.cmd_start)
         router.message(Command("help"))(self.cmd_start)
         router.message(Command("new"))(self.cmd_new)
+        router.message(Command("project", "projects"))(self.cmd_project)
         router.message(Command("status"))(self.cmd_status)
         router.message(Command("stop"))(self.cmd_stop)
         router.message(Command("esc"))(self.cmd_esc)
@@ -83,6 +85,15 @@ class BotApp:
             return
         key = f"{chat}:{topic.message_thread_id}"
         await self._show_picker(chat, topic.message_thread_id, key, "Выбери проект для новой сессии:")
+
+    async def cmd_project(self, message: Message) -> None:
+        chat, thread, key = key_of(message)
+        live = self.sessions.get(key)
+        if live:
+            title = f"Сейчас: <b>{esc(live.rec.title)}</b>. Сменить проект? Текущая сессия закроется."
+            await self._show_picker(chat, thread, key, title, switch=True)
+        else:
+            await self._show_picker(chat, thread, key, "В каком проекте работаем?")
 
     async def cmd_status(self, message: Message) -> None:
         chat, thread, key = key_of(message)
@@ -130,6 +141,10 @@ class BotApp:
         if self.sessions.get(key):
             await self._forward(key, message)
             return
+        if (message.text or "").startswith("/"):
+            # незнакомая команда до выбора проекта — не копим её как первое сообщение для Claude
+            await self._show_picker(chat, thread, key, "Сначала выбери проект:")
+            return
         first = key not in self.pending
         self.pending.setdefault(key, []).append(message)
         if first:
@@ -162,16 +177,18 @@ class BotApp:
 
     # ---------- выбор проекта ----------
 
-    async def _show_picker(self, chat: int, thread: int, key: str, title: str, page: int = 0) -> None:
+    async def _show_picker(self, chat: int, thread: int, key: str, title: str, switch: bool = False) -> None:
         projects = self.sessions.projects()
         self.pickers[key] = projects
-        await tg.send(self.bot, chat, thread, f"📁 {title}", self._picker_kb(projects, page))
+        await tg.send(self.bot, chat, thread, f"📁 {title}", self._picker_kb(projects, 0, switch))
 
-    def _picker_kb(self, projects: list[str], page: int) -> InlineKeyboardMarkup:
+    def _picker_kb(self, projects: list[str], page: int, switch: bool = False) -> InlineKeyboardMarkup:
+        # суффикс ":s" — кнопка из /project: разрешено закрыть текущую сессию и открыть новую
+        sfx = ":s" if switch else ""
         chunk = projects[page * PAGE : (page + 1) * PAGE]
         rows, row = [], []
         for i, name in enumerate(chunk, start=page * PAGE):
-            row.append(Btn(text=name[:40], callback_data=f"ps:{i}"))
+            row.append(Btn(text=name[:40], callback_data=f"ps:{i}{sfx}"))
             if len(row) == 2:
                 rows.append(row)
                 row = []
@@ -179,26 +196,29 @@ class BotApp:
             rows.append(row)
         nav = []
         if page > 0:
-            nav.append(Btn(text="◀️", callback_data=f"pj:{page - 1}"))
+            nav.append(Btn(text="◀️", callback_data=f"pj:{page - 1}{sfx}"))
         if (page + 1) * PAGE < len(projects):
-            nav.append(Btn(text="▶️", callback_data=f"pj:{page + 1}"))
+            nav.append(Btn(text="▶️", callback_data=f"pj:{page + 1}{sfx}"))
         if nav:
             rows.append(nav)
-        rows.append([Btn(text="💬 Без проекта (чат + веб-поиск)", callback_data="pc")])
+        rows.append([Btn(text="💬 Без проекта (чат + веб-поиск)", callback_data=f"pc{sfx}")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def on_pick(self, cb: CallbackQuery) -> None:
         msg = cb.message
         chat, thread, key = key_of(msg)
         projects = self.pickers.get(key) or self.sessions.projects()
-        if cb.data.startswith("pj:"):
+        data, switch = cb.data.removesuffix(":s"), cb.data.endswith(":s")
+        if data.startswith("pj:"):
             await cb.answer()
-            await msg.edit_reply_markup(reply_markup=self._picker_kb(projects, int(cb.data[3:])))
+            await msg.edit_reply_markup(reply_markup=self._picker_kb(projects, int(data[3:]), switch))
             return
         if self.sessions.get(key):
-            await cb.answer("Сессия уже запущена")
-            return
-        project = None if cb.data == "pc" else projects[int(cb.data[3:])]
+            if not switch:
+                await cb.answer("Сессия уже запущена. Сменить проект — /project")
+                return
+            await self.sessions.stop(key)
+        project = None if data == "pc" else projects[int(data[3:])]
         if project is not None and not (self.cfg.repos_dir / project).is_dir():
             await cb.answer("Папка пропала", show_alert=True)
             return

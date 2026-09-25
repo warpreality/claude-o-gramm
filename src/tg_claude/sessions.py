@@ -265,6 +265,8 @@ class SessionManager:
         args = [self.cfg.claude_bin]
         args += ["--resume", rec.session_id] if resume else ["--session-id", rec.session_id]
         args += ["--permission-mode", self.cfg.permission_mode, "--settings", str(self._settings_file(rec))]
+        # серые подсказки следующего сообщения в поле ввода нам не нужны (и мешают проверке ввода)
+        args += ["--prompt-suggestions", "false"]
         system = SYSTEM_PROMPT
         if rec.project is None:
             args += ["--restricted", "--tools", CHAT_TOOLS, "--strict-mcp-config", "--disable-slash-commands"]

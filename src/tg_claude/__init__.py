@@ -34,6 +34,7 @@ async def run(cfg: Config) -> None:
     await sessions.restore()
     await bot.set_my_commands([
         BotCommand(command="new", description="Новый тред / сессия"),
+        BotCommand(command="project", description="Выбрать / сменить проект"),
         BotCommand(command="status", description="Статус сессии в этом треде"),
         BotCommand(command="esc", description="Прервать текущий ответ"),
         BotCommand(command="stop", description="Закрыть сессию"),
