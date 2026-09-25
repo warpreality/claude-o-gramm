@@ -46,3 +46,26 @@ def test_titles():
     assert ev[0].kind == "title" and ev[0].text == "GitLab authorization" and not ev[0].custom
     ev = to_events({"type": "custom-title", "customTitle": "Мой тред"}, "/")
     assert ev[0].custom
+
+
+def test_usage_parse():
+    from tg_claude.usage import format_html, parse
+
+    screen = """   Current session
+   ██                                                 4% used
+   Resets 12:59am (UTC)
+   Current week (all models)
+   ███████████                                        22% used
+   Resets Sep 26, 7:59am (UTC)
+   Current week (Fable)
+                                                      0% used
+   Resets Sep 26, 8am (UTC)
+   What's contributing to your limits usage?
+   30% of your usage came from subagent-heavy sessions"""
+    limits = parse(screen)
+    assert [(x.title, x.percent) for x in limits] == [
+        ("Current session", 4), ("Current week (all models)", 22), ("Current week (Fable)", 0),
+    ]
+    assert limits[1].resets == "Sep 26, 7:59am (UTC)"
+    html = format_html(limits)
+    assert "Неделя, Fable" in html and "22%" in html

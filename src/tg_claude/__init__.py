@@ -36,6 +36,7 @@ async def run(cfg: Config) -> None:
         BotCommand(command="new", description="Новый тред / сессия"),
         BotCommand(command="project", description="Выбрать / сменить проект"),
         BotCommand(command="status", description="Статус сессии в этом треде"),
+        BotCommand(command="limits", description="Лимиты подписки Claude"),
         BotCommand(command="esc", description="Прервать текущий ответ"),
         BotCommand(command="stop", description="Закрыть сессию"),
         BotCommand(command="help", description="Помощь"),

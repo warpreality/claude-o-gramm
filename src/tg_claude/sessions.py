@@ -275,8 +275,7 @@ class SessionManager:
             args += ["--restricted", "--tools", CHAT_TOOLS, "--strict-mcp-config", "--disable-slash-commands"]
             system += CHAT_PROMPT
         args += ["--append-system-prompt", system, *self.cfg.extra_args]
-        unset = " ".join(f"-u {v}" for v in _UNSET_VARS)
-        return f"cd {shlex.quote(rec.cwd)} && exec env {unset} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false {shlex.join(args)}"
+        return claude_shell(rec.cwd, args)
 
     async def _launch(self, live: Live, resume: bool, prompt: str | None) -> None:
         rec = live.rec
@@ -292,26 +291,11 @@ class SessionManager:
 
     async def _babysit_startup(self, live: Live, paste: str | None) -> None:
         """Проходим стартовые диалоги TUI (доверие к папке, MCP) и ждём готовности."""
-        name = live.rec.tmux
-        deadline = time.monotonic() + 45
-        while time.monotonic() < deadline:
-            await asyncio.sleep(0.7)
-            if not await tmux.has_session(name):
-                await tg.send(self.bot, live.rec.chat_id, live.rec.thread_id, "❌ Claude не запустился. Проверь `claude` на сервере.")
-                self._set_busy(live, False)
-                return
-            screen = await tmux.capture(name)
-            if "trust this folder" in screen or "Do you trust" in screen:
-                await tmux.send_keys(name, "Enter" if re.search(r"❯\s*(\d\.\s*)?Yes", screen) else "Down")
-            elif "MCP servers found" in screen or "MCP server found" in screen:
-                await tmux.send_keys(name, "Escape")
-            elif any(m in screen for m in _READY):
-                break
-            elif "Enter to confirm" in screen:
-                log.warning("неизвестный диалог при старте %s:\n%s", name, screen)
-                await tmux.send_keys(name, "Enter")
-        else:
-            log.warning("сессия %s не дошла до готовности за 45с", name)
+        ready = await wait_ready(live.rec.tmux)
+        if ready is None:
+            await tg.send(self.bot, live.rec.chat_id, live.rec.thread_id, "❌ Claude не запустился. Проверь `claude` на сервере.")
+            self._set_busy(live, False)
+            return
         if paste:
             await asyncio.sleep(1.0)
             await self._submit(live, paste)
@@ -460,6 +444,36 @@ class SessionManager:
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
+async def wait_ready(name: str, timeout: float = 45) -> bool | None:
+    """Ждёт готовности TUI Claude, проходя стартовые диалоги.
+    True — готов, False — не дождались (но процесс жив), None — процесс завершился."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.7)
+        if not await tmux.has_session(name):
+            return None
+        screen = await tmux.capture(name)
+        if "trust this folder" in screen or "Do you trust" in screen:
+            await tmux.send_keys(name, "Enter" if re.search(r"❯\s*(\d\.\s*)?Yes", screen) else "Down")
+        elif "MCP servers found" in screen or "MCP server found" in screen:
+            await tmux.send_keys(name, "Escape")
+        elif any(m in screen for m in _READY):
+            return True
+        elif "Enter to confirm" in screen:
+            log.warning("неизвестный диалог при старте %s:\n%s", name, screen)
+            await tmux.send_keys(name, "Enter")
+    log.warning("сессия %s не дошла до готовности за %.0fс", name, timeout)
+    return False
+
+
+def claude_shell(cwd: str, args: list[str]) -> str:
+    """Команда для tmux: запуск claude в папке без переменных родительского Claude."""
+    unset = " ".join(f"-u {v}" for v in _UNSET_VARS)
+    # сервер tmux мог стартовать с другим окружением — часовой пояс передаём явно
+    tz = f"TZ={shlex.quote(os.environ['TZ'])} " if os.environ.get("TZ") else ""
+    return f"cd {shlex.quote(cwd)} && exec env {unset} {tz}CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false {shlex.join(args)}"
 
 
 def _input_text(screen: str) -> str:

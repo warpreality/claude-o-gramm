@@ -12,7 +12,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.types import InlineKeyboardMarkup
 
-from . import tg, tmux
+from . import tg, tmux, usage
 from .config import Config
 from .questions import Interactions
 from .render import esc
@@ -30,6 +30,7 @@ HELP = (
     "/esc — прервать текущий ответ\n"
     "/stop — закрыть сессию (следующее сообщение предложит выбрать проект заново)\n"
     "/project — выбрать или сменить проект в этом треде\n"
+    "/limits — сколько осталось лимитов подписки Claude\n"
     "/new — создать новый тред\n\n"
     "Остальные команды со слешем (например /compact) уходят прямо в Claude."
 )
@@ -60,6 +61,7 @@ class BotApp:
         router.message(Command("help"))(self.cmd_start)
         router.message(Command("new"))(self.cmd_new)
         router.message(Command("project", "projects"))(self.cmd_project)
+        router.message(Command("limits", "usage"))(self.cmd_limits)
         router.message(Command("status"))(self.cmd_status)
         router.message(Command("stop"))(self.cmd_stop)
         router.message(Command("esc"))(self.cmd_esc)
@@ -94,6 +96,18 @@ class BotApp:
             await self._show_picker(chat, thread, key, title, switch=True)
         else:
             await self._show_picker(chat, thread, key, "В каком проекте работаем?")
+
+    async def cmd_limits(self, message: Message) -> None:
+        chat, thread, _ = key_of(message)
+        await tg.react(self.bot, chat, message.message_id, "👀")
+        try:
+            limits = await usage.fetch(self.cfg)
+        except Exception as e:
+            log.exception("не удалось получить лимиты")
+            await tg.send(self.bot, chat, thread, f"❌ Не удалось получить лимиты: {esc(str(e))}")
+            return
+        await tg.send(self.bot, chat, thread, usage.format_html(limits))
+        await tg.react(self.bot, chat, message.message_id, "👍")
 
     async def cmd_status(self, message: Message) -> None:
         chat, thread, key = key_of(message)
