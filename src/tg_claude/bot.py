@@ -16,6 +16,7 @@ from . import tg, tmux, usage
 from .config import Config
 from .questions import Interactions
 from .render import esc
+from .rich import rich_of, rich_to_text
 from .sessions import SessionManager
 
 log = logging.getLogger(__name__)
@@ -41,7 +42,8 @@ async def _log_update(handler, update, data):
     msg = update.message or update.edited_message
     if msg:
         kind = "edited" if update.edited_message else msg.content_type
-        text = msg.text or msg.caption or ""
+        rich = rich_of(msg)
+        text = msg.text or msg.caption or (rich_to_text(rich) if rich else "")
         log.info("входящее %s [%s:%s] от %s: %d симв. %r", kind, msg.chat.id, msg.message_thread_id or 0,
                  msg.from_user.id if msg.from_user else "?", len(text), text[:60])
         if not text:  # непонятное сообщение — пишем его целиком, чтобы разобраться
@@ -83,7 +85,7 @@ class BotApp:
         router.message(Command("status"))(self.cmd_status)
         router.message(Command("stop"))(self.cmd_stop)
         router.message(Command("esc"))(self.cmd_esc)
-        router.message(F.text | F.photo | F.document | F.caption)(self.on_message)
+        router.message(F.text | F.photo | F.document | F.caption | F.func(rich_of))(self.on_message)
         router.message(F.voice | F.video_note | F.audio)(self.on_voice)
         router.message()(self.on_unsupported)
         router.edited_message.filter(allowed)
@@ -180,7 +182,8 @@ class BotApp:
     async def on_message(self, message: Message) -> None:
         chat, thread, key = key_of(message)
         await tg.react(self.bot, chat, message.message_id, "👀")
-        if message.text and self.interactions.take_text_answer(key, message.text):
+        answer = message.text or (rich_to_text(rich_of(message)) if rich_of(message) else "")
+        if answer and self.interactions.take_text_answer(key, answer):
             await tg.react(self.bot, chat, message.message_id, "👍")
             return
         if self.sessions.get(key):
@@ -204,7 +207,8 @@ class BotApp:
         await self.sessions.send(key, prompt)
 
     async def _prompt_of(self, message: Message, chat_dir: Path | None) -> str:
-        text = message.text or message.caption or ""
+        rich = rich_of(message)
+        text = message.text or message.caption or (rich_to_text(rich) if rich else "")
         file = message.document or (message.photo[-1] if message.photo else None)
         if not file:
             return text
