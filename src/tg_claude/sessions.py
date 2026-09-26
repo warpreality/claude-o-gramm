@@ -135,6 +135,7 @@ class SessionManager:
         """Набирает сообщение в TUI, отправляет и проверяет, что оно ушло."""
         name = live.rec.tmux
         offset_before = live.rec.offset
+        log.info("отправляю в %s: %d симв.", name, len(text))
         await tmux.type_text(name, text)
         await asyncio.sleep(0.4)
         await tmux.send_keys(name, "Enter")

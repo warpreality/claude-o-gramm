@@ -36,6 +36,19 @@ HELP = (
 )
 
 
+async def _log_update(handler, update, data):
+    """Логируем каждое входящее обновление — чтобы было видно, дошло ли сообщение до бота."""
+    msg = update.message or update.edited_message
+    if msg:
+        kind = "edited" if update.edited_message else msg.content_type
+        text = msg.text or msg.caption or ""
+        log.info("входящее %s [%s:%s] от %s: %d симв. %r", kind, msg.chat.id, msg.message_thread_id or 0,
+                 msg.from_user.id if msg.from_user else "?", len(text), text[:60])
+    elif update.callback_query:
+        log.info("кнопка %r от %s", update.callback_query.data, update.callback_query.from_user.id)
+    return await handler(update, data)
+
+
 def key_of(message: Message) -> tuple[int, int, str]:
     thread = message.message_thread_id or 0
     return message.chat.id, thread, f"{message.chat.id}:{thread}"
@@ -52,6 +65,7 @@ class BotApp:
 
     def dispatcher(self) -> Dispatcher:
         dp = Dispatcher()
+        dp.update.outer_middleware(_log_update)
         router = Router()
         allowed = F.from_user.id.in_(self.cfg.allowed_users)
         router.message.filter(allowed)
@@ -67,6 +81,9 @@ class BotApp:
         router.message(Command("esc"))(self.cmd_esc)
         router.message(F.text | F.photo | F.document | F.caption)(self.on_message)
         router.message(F.voice | F.video_note | F.audio)(self.on_voice)
+        router.message()(self.on_unsupported)
+        router.edited_message.filter(allowed)
+        router.edited_message()(self.on_edited)
         router.callback_query(F.data.startswith(("pj:", "ps:", "pc")))(self.on_pick)
         router.callback_query(F.data.startswith(("p:", "q:")))(self.on_interaction)
         dp.include_router(router)
@@ -141,6 +158,16 @@ class BotApp:
             await tg.send(self.bot, chat, thread, "⏸ Прервал.")
 
     # ---------- сообщения ----------
+
+    async def on_unsupported(self, message: Message) -> None:
+        if message.forum_topic_created or message.forum_topic_edited or message.pinned_message:
+            return  # служебные сообщения тредов
+        chat, thread, _ = key_of(message)
+        await tg.send(self.bot, chat, thread, f"Такой тип сообщения ({esc(message.content_type)}) пока не понимаю — напиши текстом или пришли файлом.")
+
+    async def on_edited(self, message: Message) -> None:
+        chat, thread, _ = key_of(message)
+        await tg.send(self.bot, chat, thread, "✏️ Правку уже отправленного сообщения Claude не увидит — отправь исправленный текст новым сообщением.")
 
     async def on_voice(self, message: Message) -> None:
         chat, thread, _ = key_of(message)

@@ -44,7 +44,7 @@ async def run(cfg: Config) -> None:
     me = await bot.get_me()
     log.info("бот @%s запущен, проекты: %s", me.username, cfg.repos_dir)
     try:
-        await app.dispatcher().start_polling(bot, allowed_updates=["message", "callback_query"], handle_signals=True)
+        await app.dispatcher().start_polling(bot, allowed_updates=["message", "edited_message", "callback_query"], handle_signals=True)
     finally:
         await hooks.stop()
         await bot.session.close()
