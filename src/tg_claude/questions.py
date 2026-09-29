@@ -34,6 +34,10 @@ class Interactions:
         self.pending: dict[str, Pending] = {}
         self.awaiting_text: dict[str, str] = {}  # ключ сессии -> id вопроса, ждущего свободный ответ
 
+    def _where(self, rec: SessionRec) -> str:
+        m = self.messengers.get(rec.platform)
+        return m.name if m else "мессенджере"
+
     async def _send(self, rec: SessionRec, text: str, buttons: Buttons | None = None) -> MsgId | None:
         return await self.messengers[rec.platform].send(rec.conv, text, buttons)
 
@@ -77,7 +81,7 @@ class Interactions:
                 "и дождись его следующего сообщения с правками."
             )}
         elif choice == "n":
-            decision = {"behavior": "deny", "message": "Пользователь запретил это действие в Telegram."}
+            decision = {"behavior": "deny", "message": f"Пользователь запретил это действие в {self._where(rec)}."}
         else:
             decision = {"behavior": "allow"}
             if choice == "a" and suggestions:
@@ -92,11 +96,11 @@ class Interactions:
         for q in questions:
             answer = await self._ask_one(rec, q)
             if answer is None:
-                return _deny("Пользователь не ответил на вопрос в Telegram. Не повторяй вопрос, продолжай по своему усмотрению или остановись.")
+                return _deny(f"Пользователь не ответил на вопрос в {self._where(rec)}. Не повторяй вопрос, продолжай по своему усмотрению или остановись.")
             answers.append((q.get("question", ""), answer))
         lines = "\n".join(f"- «{q}» → {a}" for q, a in answers)
         return _deny(
-            "Пользователь уже ответил на твои вопросы через Telegram-кнопки (это не ошибка):\n"
+            f"Пользователь уже ответил на твои вопросы кнопками в {self._where(rec)} (это не ошибка):\n"
             f"{lines}\nПродолжай с учётом этих ответов, не задавай эти вопросы повторно."
         )
 

@@ -44,6 +44,7 @@ CHAT_PROMPT = (
     "доступа к проектам и командам нет."
 )
 _CYRILLIC = re.compile("[а-яё]", re.I)
+IDLE_HOURS = float(os.environ.get("TGC_IDLE_HOURS", "6"))  # 0 — не закрывать простаивающие сессии
 _READY = ("for shortcuts", "esc to interrupt", "? for", "shift+tab to cycle", "auto mode on", "accept edits on", "plan mode on")
 
 
@@ -65,6 +66,9 @@ class Live:
     starting: asyncio.Event = field(default_factory=asyncio.Event)
     watchdog: asyncio.Task | None = None
     shown_plans: set = field(default_factory=set)  # планы (ExitPlanMode), уже отправленные в чат
+    # ввод в TUI строго по одному сообщению: иначе порции двух сообщений перемешаются
+    input_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    last_active: float = field(default_factory=time.monotonic)  # для закрытия простаивающих сессий
 
 
 class SessionManager:
@@ -73,6 +77,8 @@ class SessionManager:
         self.store = store
         self.messengers = messengers
         self.live: dict[str, Live] = {}
+        self._bg: set[asyncio.Task] = set()  # фоновые задачи: держим ссылки, чтобы их не собрал GC
+        self._reaper: asyncio.Task | None = None
         (cfg.state_dir / "settings").mkdir(exist_ok=True)
         (cfg.state_dir / "chat").mkdir(exist_ok=True)
         (cfg.state_dir / "uploads").mkdir(exist_ok=True)
@@ -103,6 +109,30 @@ class SessionManager:
             if await tmux.has_session(rec.tmux):
                 self._start_tail(live)
                 log.info("подхватил живую сессию %s (%s)", rec.tmux, rec.title)
+        if IDLE_HOURS > 0 and not self._reaper:
+            self._reaper = asyncio.create_task(self._reap_idle(), name="reap-idle")
+
+    async def _reap_idle(self) -> None:
+        """Закрываем tmux простаивающих сессий: каждая держит 200–300 МБ памяти.
+        Запись о сессии остаётся — следующее сообщение поднимет её с тем же контекстом (--resume)."""
+        while True:
+            await asyncio.sleep(600)
+            for live in list(self.live.values()):
+                idle_h = (time.monotonic() - live.last_active) / 3600
+                if live.busy or live.waiting or idle_h < IDLE_HOURS or live.input_lock.locked():
+                    continue
+                try:
+                    if await tmux.has_session(live.rec.tmux):
+                        await tmux.kill_session(live.rec.tmux)
+                        log.info("закрыл простаивающую сессию %s (%.1f ч без активности)", live.rec.tmux, idle_h)
+                except tmux.TmuxError as e:
+                    log.warning("не удалось закрыть простаивающую сессию %s: %s", live.rec.tmux, e)
+
+    def _spawn(self, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+        return task
 
     async def start(
         self, conv: Conv, project: str | None, prompt: str | None, reaction_ids: list[int | str] = (),
@@ -131,13 +161,15 @@ class SessionManager:
     async def send(self, key: str, text: str) -> None:
         live = self.live[key]
         await live.starting.wait()
-        live.sent_texts.append(_norm(text))
-        self._set_busy(live, True)
-        if not await tmux.has_session(live.rec.tmux):
-            await self._say(live.rec, "♻️ <i>Сессия была закрыта — поднимаю заново…</i>")
-            await self._launch(live, resume=True, prompt=text)
-            return
-        await self._submit(live, text)
+        async with live.input_lock:
+            live.last_active = time.monotonic()
+            live.sent_texts.append(_norm(text))
+            self._set_busy(live, True)
+            if not await tmux.has_session(live.rec.tmux):
+                await self._say(live.rec, "♻️ <i>Поднимаю сессию заново (контекст сохранён)…</i>")
+                await self._launch(live, resume=True, prompt=text)
+                return
+            await self._submit(live, text)
 
     async def _submit(self, live: Live, text: str) -> None:
         """Набирает сообщение в TUI, отправляет и проверяет, что оно ушло."""
@@ -155,7 +187,7 @@ class SessionManager:
             await tmux.send_keys(name, "Enter")
         if live.watchdog and not live.watchdog.done():
             live.watchdog.cancel()
-        live.watchdog = asyncio.create_task(self._watchdog(live, offset_before))
+        live.watchdog = self._spawn(self._watchdog(live, offset_before))
 
     async def _watchdog(self, live: Live, offset_before: int) -> None:
         """Если Claude никак не отреагировал — показываем пользователю экран терминала."""
@@ -196,7 +228,7 @@ class SessionManager:
         последняя реплика попадает в транскрипт чуть позже самого хука."""
         live = self.live.get(key)
         if live:
-            asyncio.create_task(self._finish_turn(live))
+            self._spawn(self._finish_turn(live))
 
     async def _finish_turn(self, live: Live) -> None:
         path = find_transcript(live.rec.session_id)
@@ -241,6 +273,7 @@ class SessionManager:
         live = self.live.get(key)
         if live:
             live.waiting = waiting
+            live.last_active = time.monotonic()
 
     # ---------- запуск ----------
 
@@ -347,6 +380,7 @@ class SessionManager:
 
     async def _emit(self, live: Live, ev) -> None:
         rec = live.rec
+        live.last_active = time.monotonic()
         m = self._m(rec)
         if ev.kind == "text":
             await self._flush_activity(live, force=True)
@@ -390,7 +424,7 @@ class SessionManager:
         await self._m(live.rec).send_markdown(live.rec.conv, "📋 **План**\n\n" + plan)
 
     async def _rename_topic(self, live: Live, title: str, custom: bool) -> None:
-        """Называем тред в Telegram по заголовку сессии Claude."""
+        """Называем тред по заголовку сессии Claude (где мессенджер это умеет)."""
         rec = live.rec
         source = " ".join(title.split())
         if not self._m(rec).supports_rename or not rec.thread_id or not source or source == rec.topic_title or (rec.custom_title and not custom):
@@ -446,7 +480,7 @@ class SessionManager:
     def _set_busy(self, live: Live, busy: bool) -> None:
         live.busy = busy
         if busy and (not live.typing_task or live.typing_task.done()):
-            live.typing_task = asyncio.create_task(self._typing(live))
+            live.typing_task = self._spawn(self._typing(live))
 
     async def _typing(self, live: Live) -> None:
         rec = live.rec

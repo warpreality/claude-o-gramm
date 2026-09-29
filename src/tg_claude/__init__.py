@@ -59,8 +59,10 @@ async def run(cfg: Config) -> None:
             if not bot:
                 raise SystemExit(f"Mattermost недоступен ({e or 'нет ответа за 30с'}), а Telegram не настроен — запускать нечего")
 
-    await hooks.start()
+    # сначала подхватываем сессии, потом открываем сокет: хуки, повторённые после перезапуска,
+    # должны найти свою сессию
     await sessions.restore()
+    await hooks.start()
     jobs = []
     try:
         if bot:

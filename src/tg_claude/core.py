@@ -60,6 +60,7 @@ class ChatCore:
         self.messengers = messengers
         self.pending: dict[str, list[Incoming]] = {}  # сообщения до выбора проекта
         self.pickers: dict[str, tuple[list[str], str]] = {}  # снимок списка проектов и заголовок пикера
+        self.launching: set[str] = set()  # треды, где прямо сейчас запускается сессия (защита от двойного нажатия)
 
     def _m(self, conv: Conv) -> Messenger:
         return self.messengers[conv.platform]
@@ -268,6 +269,19 @@ class ChatCore:
             await answer()
             await m.edit(conv, message_id, picker_text, self._picker_kb(projects, int(data[3:]), switch))
             return
+        # двойное нажатие: второе нажатие перезапустило бы сессию и потеряло первое сообщение
+        if key in self.launching:
+            await answer("Уже запускаю…")
+            return
+        self.launching.add(key)
+        try:
+            await self._start_picked(conv, message_id, data, switch, projects, answer)
+        finally:
+            self.launching.discard(key)
+
+    async def _start_picked(self, conv: Conv, message_id: MsgId, data: str, switch: bool,
+                            projects: list[str], answer: Answer) -> None:
+        key, m = conv.key, self._m(conv)
         if self.sessions.get(key):
             if not switch:
                 await answer(f"Сессия уже запущена. Сменить проект — {m.cmd_prefix}project", True)

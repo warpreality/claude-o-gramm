@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from .messenger import Conv
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,9 +45,23 @@ class Store:
         self.path = path
         self.sessions: dict[str, SessionRec] = {}
         if path.exists():
-            data = json.loads(path.read_text())
-            for key, rec in data.get("sessions", {}).items():
-                self.sessions[key] = SessionRec(**rec)
+            self._load()
+
+    def _load(self) -> None:
+        """Битый файл или незнакомые поля (например, после отката версии) не должны мешать запуску."""
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError) as e:
+            broken = self.path.with_suffix(".broken")
+            os.replace(self.path, broken)
+            log.error("state.json не читается (%s) — отложил в %s, начинаю с пустого состояния", e, broken.name)
+            return
+        known = {f.name for f in fields(SessionRec)}
+        for key, raw in (data.get("sessions") or {}).items():
+            try:
+                self.sessions[key] = SessionRec(**{k: v for k, v in raw.items() if k in known})
+            except TypeError as e:
+                log.warning("пропускаю сессию %s из state.json: %s", key, e)
 
     def get(self, key: str) -> SessionRec | None:
         return self.sessions.get(key)
