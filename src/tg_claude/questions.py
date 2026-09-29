@@ -7,11 +7,7 @@ import json
 import secrets
 from dataclasses import dataclass, field
 
-from aiogram import Bot
-from aiogram.types import InlineKeyboardButton as Btn
-from aiogram.types import InlineKeyboardMarkup
-
-from . import tg
+from .messenger import Buttons, Messenger, MsgId
 from .render import esc
 from .store import SessionRec
 
@@ -22,7 +18,7 @@ TIMEOUT = 3600
 class Pending:
     kind: str  # "perm" | "question"
     rec: SessionRec
-    message_id: int
+    message_id: MsgId
     text: str
     future: asyncio.Future
     options: list[str] = field(default_factory=list)
@@ -33,10 +29,16 @@ class Pending:
 
 
 class Interactions:
-    def __init__(self, bot: Bot):
-        self.bot = bot
+    def __init__(self, messengers: dict[str, Messenger]):
+        self.messengers = messengers
         self.pending: dict[str, Pending] = {}
         self.awaiting_text: dict[str, str] = {}  # ключ сессии -> id вопроса, ждущего свободный ответ
+
+    async def _send(self, rec: SessionRec, text: str, buttons: Buttons | None = None) -> MsgId | None:
+        return await self.messengers[rec.platform].send(rec.conv, text, buttons)
+
+    async def _edit(self, rec: SessionRec, message_id: MsgId, text: str, buttons: Buttons | None = None) -> None:
+        await self.messengers[rec.platform].edit(rec.conv, message_id, text, buttons)
 
     # ---------- разрешения ----------
 
@@ -45,28 +47,28 @@ class Interactions:
         suggestions = data.get("permission_suggestions") or None
         pid = secrets.token_hex(4)
         is_plan = tool == "ExitPlanMode"
-        if is_plan:  # сам план уже отправлен сообщением выше (из транскрипта)
+        if is_plan:  # сам план уже отправлен сообщением выше
             text = "📋 <b>План готов</b> — он в сообщении выше. Выполнять?"
-            row = [Btn(text="✅ Выполнять", callback_data=f"p:{pid}:y"), Btn(text="✏️ Доработать", callback_data=f"p:{pid}:n")]
+            row = [("✅ Выполнять", f"p:{pid}:y"), ("✏️ Доработать", f"p:{pid}:n")]
             labels = {"y": "✅ План утверждён", "n": "✏️ План не утверждён — напиши, что поменять"}
             suggestions = None
         else:
             text = "⚠️ <b>Claude просит разрешение</b>\n\n" + describe_tool(tool, data.get("tool_input") or {})
-            row = [Btn(text="✅ Разрешить", callback_data=f"p:{pid}:y")]
+            row = [("✅ Разрешить", f"p:{pid}:y")]
             if suggestions:
-                row.append(Btn(text="✅ Всегда", callback_data=f"p:{pid}:a"))
-            row.append(Btn(text="❌ Запретить", callback_data=f"p:{pid}:n"))
+                row.append(("✅ Всегда", f"p:{pid}:a"))
+            row.append(("❌ Запретить", f"p:{pid}:n"))
             labels = None
-        msg = await tg.send(self.bot, rec.chat_id, rec.thread_id, text, InlineKeyboardMarkup(inline_keyboard=[row]))
-        if not msg:
+        mid = await self._send(rec, text, [row])
+        if mid is None:
             return {}
         fut = asyncio.get_running_loop().create_future()
-        self.pending[pid] = Pending("perm", rec, msg.message_id, text, fut, suggestions=suggestions, labels=labels)
+        self.pending[pid] = Pending("perm", rec, mid, text, fut, suggestions=suggestions, labels=labels)
         try:
             choice = await asyncio.wait_for(fut, TIMEOUT)
         except TimeoutError:
             choice = "n"
-            await tg.edit(self.bot, rec.chat_id, msg.message_id, text + "\n\n⌛ <i>Нет ответа — запрещено</i>")
+            await self._edit(rec, mid, text + "\n\n⌛ <i>Нет ответа — запрещено</i>")
         finally:
             self.pending.pop(pid, None)
         if choice == "n" and is_plan:
@@ -110,10 +112,10 @@ class Interactions:
             text += "\n\n<i>Можно выбрать несколько, затем «Готово».</i>"
         qid = secrets.token_hex(4)
         p = Pending("question", rec, 0, text, None, options=options, multi=multi)  # type: ignore[arg-type]
-        msg = await tg.send(self.bot, rec.chat_id, rec.thread_id, text, self._question_kb(qid, p))
-        if not msg:
+        mid = await self._send(rec, text, self._question_kb(qid, p))
+        if mid is None:
             return None
-        p.message_id = msg.message_id
+        p.message_id = mid
         p.future = asyncio.get_running_loop().create_future()
         self.pending[qid] = p
         try:
@@ -125,48 +127,48 @@ class Interactions:
             if self.awaiting_text.get(rec.key) == qid:
                 self.awaiting_text.pop(rec.key)
         shown = esc(answer) if answer is not None else "<i>нет ответа</i>"
-        await tg.edit(self.bot, rec.chat_id, p.message_id, f"{text}\n\n<b>Ответ:</b> {shown}")
+        await self._edit(rec, p.message_id, f"{text}\n\n<b>Ответ:</b> {shown}")
         return answer
 
-    def _question_kb(self, qid: str, p: Pending) -> InlineKeyboardMarkup:
+    def _question_kb(self, qid: str, p: Pending) -> Buttons:
         rows = []
         for i, label in enumerate(p.options):
             mark = ("☑️ " if i in p.selected else "⬜ ") if p.multi else ""
-            rows.append([Btn(text=f"{mark}{label}"[:64], callback_data=f"q:{qid}:{i}")])
+            rows.append([(f"{mark}{label}"[:64], f"q:{qid}:{i}")])
         if p.multi:
-            rows.append([Btn(text="✅ Готово", callback_data=f"q:{qid}:ok")])
-        rows.append([Btn(text="✏️ Свой ответ", callback_data=f"q:{qid}:txt")])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
+            rows.append([("✅ Готово", f"q:{qid}:ok")])
+        rows.append([("✏️ Свой ответ", f"q:{qid}:txt")])
+        return rows
 
     # ---------- нажатия кнопок и текст ----------
 
-    async def on_callback(self, data: str) -> str:
-        """Возвращает текст всплывающего уведомления."""
+    async def on_callback(self, data: str) -> tuple[str, bool]:
+        """Возвращает текст всплывающего уведомления и признак «важное» (показать как предупреждение)."""
         kind, pid, value = data.split(":", 2)
         p = self.pending.get(pid)
         if not p or p.future.done():
-            return "Вопрос уже неактуален"
+            return "Вопрос уже неактуален", True
         rec = p.rec
         if kind == "p":
             label = (p.labels or {"y": "✅ Разрешено", "a": "✅ Разрешено навсегда", "n": "❌ Запрещено"})[value]
-            await tg.edit(self.bot, rec.chat_id, p.message_id, f"{p.text}\n\n<b>{label}</b>")
+            await self._edit(rec, p.message_id, f"{p.text}\n\n<b>{label}</b>")
             p.future.set_result(value)
-            return label
+            return label, False
         if value == "txt":
             self.awaiting_text[rec.key] = pid
-            await tg.send(self.bot, rec.chat_id, rec.thread_id, "✏️ Напиши ответ следующим сообщением")
-            return "Жду ответ текстом"
+            await self._send(rec, "✏️ Напиши ответ следующим сообщением")
+            return "Жду ответ текстом", False
         if value == "ok":
             chosen = [p.options[i] for i in sorted(p.selected)]
             p.future.set_result(", ".join(chosen) if chosen else "(ничего не выбрано)")
-            return "Принято"
+            return "Принято", False
         idx = int(value)
         if not p.multi:
             p.future.set_result(p.options[idx])
-            return p.options[idx]
+            return p.options[idx], False
         p.selected ^= {idx}
-        await tg.edit(self.bot, rec.chat_id, p.message_id, p.text, self._question_kb(pid, p))
-        return ""
+        await self._edit(rec, p.message_id, p.text, self._question_kb(pid, p))
+        return "", False
 
     def take_text_answer(self, key: str, text: str) -> bool:
         qid = self.awaiting_text.pop(key, None)

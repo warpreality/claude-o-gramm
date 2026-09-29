@@ -1,4 +1,4 @@
-"""tg-claude: Telegram-бот, который транслирует диалоги в Claude Code, запущенный в tmux."""
+"""tg-claude: бот для Telegram и Mattermost, который транслирует диалоги в Claude Code, запущенный в tmux."""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ import argparse
 import asyncio
 import logging
 import shutil
+import signal
+
+import aiohttp
 
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
@@ -14,44 +17,92 @@ from dotenv import load_dotenv
 
 from .bot import BotApp
 from .config import Config
+from .core import ChatCore
 from .hook_server import HookServer
+from .mattermost import Mattermost, MMError
+from .messenger import Messenger
 from .questions import Interactions
 from .sessions import SessionManager
 from .store import Store
+from .tg import TelegramMessenger
 
 log = logging.getLogger("tg_claude")
 
 
 async def run(cfg: Config) -> None:
-    bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode="HTML"))
+    messengers: dict[str, Messenger] = {}
+    bot = mm = None
+    if cfg.bot_token:
+        bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode="HTML"))
+        messengers["tg"] = TelegramMessenger(bot)
+    if cfg.mm_url:
+        mm = Mattermost(cfg)
+        messengers["mm"] = mm
     store = Store(cfg.state_dir / "state.json")
-    sessions = SessionManager(cfg, store, bot)
-    interactions = Interactions(bot)
+    sessions = SessionManager(cfg, store, messengers)
+    interactions = Interactions(messengers)
     hooks = HookServer(sessions, interactions, cfg.socket_path)
-    app = BotApp(cfg, bot, sessions, interactions)
+    core = ChatCore(cfg, sessions, interactions, messengers)
+    if mm:
+        mm.attach(core)
+        # Mattermost недоступен — ожидаемая ситуация (сервер лежит, неверный токен, занят порт):
+        # пишем понятную ошибку и работаем без него, а не роняем заодно Telegram
+        try:
+            await asyncio.wait_for(mm.start(), 30)
+        except (MMError, aiohttp.ClientError, OSError, TimeoutError) as e:
+            log.error("Mattermost недоступен, работаю без него: %s", e or "нет ответа за 30с")
+            await mm.close()
+            messengers.pop("mm")
+            mm = None
+            if not bot:
+                raise SystemExit(f"Mattermost недоступен ({e or 'нет ответа за 30с'}), а Telegram не настроен — запускать нечего")
 
     await hooks.start()
     await sessions.restore()
-    await bot.set_my_commands([
-        BotCommand(command="new", description="Новый тред / сессия"),
-        BotCommand(command="project", description="Выбрать / сменить проект"),
-        BotCommand(command="status", description="Статус сессии в этом треде"),
-        BotCommand(command="limits", description="Лимиты подписки Claude"),
-        BotCommand(command="esc", description="Прервать текущий ответ"),
-        BotCommand(command="stop", description="Закрыть сессию"),
-        BotCommand(command="help", description="Помощь"),
-    ])
-    me = await bot.get_me()
-    log.info("бот @%s запущен, проекты: %s", me.username, cfg.repos_dir)
+    jobs = []
     try:
-        await app.dispatcher().start_polling(bot, allowed_updates=["message", "edited_message", "callback_query"], handle_signals=True)
+        if bot:
+            await bot.set_my_commands([
+                BotCommand(command="new", description="Новый тред / сессия"),
+                BotCommand(command="project", description="Выбрать / сменить проект"),
+                BotCommand(command="status", description="Статус сессии в этом треде"),
+                BotCommand(command="limits", description="Лимиты подписки Claude"),
+                BotCommand(command="esc", description="Прервать текущий ответ"),
+                BotCommand(command="stop", description="Закрыть сессию"),
+                BotCommand(command="help", description="Помощь"),
+            ])
+            me = await bot.get_me()
+            log.info("Telegram: бот @%s запущен, проекты: %s", me.username, cfg.repos_dir)
+            dp = BotApp(cfg, bot, core).dispatcher()
+            jobs.append(asyncio.create_task(dp.start_polling(
+                bot, allowed_updates=["message", "edited_message", "callback_query"], handle_signals=False,
+            ), name="telegram"))
+        if mm:
+            jobs.append(asyncio.create_task(mm.run(), name="mattermost"))
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+        waiter = asyncio.create_task(stop.wait())
+        done, _ = await asyncio.wait([*jobs, waiter], return_when=asyncio.FIRST_COMPLETED)
+        failed = [t for t in done if t is not waiter and not t.cancelled() and t.exception()]
+        waiter.cancel()
     finally:
+        for t in jobs:
+            t.cancel()
+        await asyncio.gather(*jobs, return_exceptions=True)
         await hooks.stop()
-        await bot.session.close()
+        if bot:
+            await bot.session.close()
+        if mm:
+            await mm.close()
+    if failed:
+        raise failed[0].exception()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="tg-claude", description="Telegram ↔ Claude Code через tmux")
+    parser = argparse.ArgumentParser(prog="tg-claude", description="Telegram / Mattermost ↔ Claude Code через tmux")
     parser.add_argument("--repos", help="папка с проектами (или REPOS_DIR в .env)")
     parser.add_argument("--env", default=".env", help="путь к .env (по умолчанию ./.env)")
     args = parser.parse_args()

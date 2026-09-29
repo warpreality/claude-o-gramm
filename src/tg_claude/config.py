@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -15,6 +15,12 @@ class Config:
     claude_bin: str
     permission_mode: str
     extra_args: list[str]
+    # Mattermost (пусто — выключен)
+    mm_url: str = ""
+    mm_token: str = ""
+    mm_users: set[str] = field(default_factory=set)  # логины без @
+    mm_listen: str = "0.0.0.0:8765"  # где слушать нажатия кнопок
+    mm_callback_url: str = ""  # как этот адрес видит сервер Mattermost
 
     @property
     def socket_path(self) -> Path:
@@ -23,11 +29,22 @@ class Config:
     @classmethod
     def load(cls, repos_dir: str | None) -> "Config":
         token = os.environ.get("BOT_TOKEN", "").strip()
-        if not token:
-            raise SystemExit("BOT_TOKEN не задан (см. .env.example)")
         users = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(" ", "").split(",") if x}
-        if not users:
+        if token and not users:
             raise SystemExit("ALLOWED_USER_IDS не задан — без него бот ответил бы кому угодно")
+        mm_url = os.environ.get("MM_URL", "").strip().rstrip("/")
+        mm_token = os.environ.get("MM_TOKEN", "").strip()
+        mm_users = {x.lstrip("@").lower() for x in os.environ.get("MM_ALLOWED_USERS", "").replace(" ", "").split(",") if x}
+        mm_callback = os.environ.get("MM_CALLBACK_URL", "").strip()
+        if mm_url or mm_token:
+            if not (mm_url and mm_token):
+                raise SystemExit("Для Mattermost нужны оба: MM_URL и MM_TOKEN")
+            if not mm_users:
+                raise SystemExit("MM_ALLOWED_USERS не задан — без него бот ответил бы кому угодно")
+            if not mm_callback:
+                raise SystemExit("MM_CALLBACK_URL не задан — без него в Mattermost не будут работать кнопки")
+        if not token and not mm_url:
+            raise SystemExit("Не настроен ни Telegram (BOT_TOKEN), ни Mattermost (MM_URL, MM_TOKEN) — см. .env.example")
         repos = Path(repos_dir or os.environ.get("REPOS_DIR", "")).expanduser()
         if not repos_dir and not os.environ.get("REPOS_DIR"):
             raise SystemExit("Укажи папку с проектами: tg-claude --repos /path/to/projects")
@@ -43,4 +60,9 @@ class Config:
             claude_bin=os.environ.get("CLAUDE_BIN", "claude"),
             permission_mode=os.environ.get("CLAUDE_PERMISSION_MODE", "auto"),
             extra_args=shlex.split(os.environ.get("CLAUDE_EXTRA_ARGS", "")),
+            mm_url=mm_url,
+            mm_token=mm_token,
+            mm_users=mm_users,
+            mm_listen=os.environ.get("MM_CALLBACK_LISTEN", "0.0.0.0:8765").strip(),
+            mm_callback_url=mm_callback,
         )

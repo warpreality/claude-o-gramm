@@ -1,4 +1,4 @@
-"""Отправка в Telegram с ретраями и фолбэком на plain text."""
+"""Telegram: отправка с ретраями и фолбэком на plain text + реализация Messenger."""
 
 from __future__ import annotations
 
@@ -9,7 +9,11 @@ import re
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions, Message, ReactionTypeEmoji
+
+from .messenger import Buttons, Conv
+from .render import render
 
 log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
@@ -71,3 +75,53 @@ async def typing(bot: Bot, chat_id: int, thread_id: int) -> None:
         await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id or None)
     except Exception:
         pass
+
+
+def keyboard(buttons: Buttons | None) -> InlineKeyboardMarkup | None:
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[Btn(text=t, callback_data=d) for t, d in row] for row in buttons])
+
+
+class TelegramMessenger:
+    platform = "tg"
+    name = "Telegram"
+    cmd_prefix = "/"
+    supports_rename = True
+
+    def __init__(self, bot: Bot):
+        self.bot = bot
+
+    async def send(self, conv: Conv, text: str, buttons: Buttons | None = None) -> int | None:
+        msg = await send(self.bot, conv.chat, conv.thread, text, keyboard(buttons))
+        return msg.message_id if msg else None
+
+    async def send_markdown(self, conv: Conv, text: str) -> None:
+        for chunk in render(text):
+            await self.send(conv, chunk)
+
+    async def edit(self, conv: Conv, message_id: int, text: str, buttons: Buttons | None = None) -> None:
+        await edit(self.bot, conv.chat, message_id, text, keyboard(buttons))
+
+    async def react(self, conv: Conv, message_id: int, emoji: str) -> None:
+        await react(self.bot, conv.chat, message_id, emoji)
+
+    async def typing(self, conv: Conv) -> None:
+        await typing(self.bot, conv.chat, conv.thread)
+
+    async def rename_thread(self, conv: Conv, name: str) -> bool:
+        if not conv.thread:
+            return False
+        try:
+            await self.bot.edit_forum_topic(conv.chat, conv.thread, name=name[:128])
+            return True
+        except Exception as e:
+            log.warning("не удалось переименовать тред %s: %s", conv.key, e)
+            return False
+
+    async def new_thread(self, conv: Conv, title: str) -> Conv:
+        try:
+            topic = await self.bot.create_forum_topic(conv.chat, title)
+        except Exception as e:
+            raise RuntimeError(f"{e}\n\nВключи Threaded Mode боту в @BotFather или создай тред вручную.") from e
+        return Conv("tg", conv.chat, topic.message_thread_id)

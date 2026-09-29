@@ -7,6 +7,7 @@ Telegram понимает только: b, i, u, s, code, pre, a, blockquote (+e
 from __future__ import annotations
 
 import html
+from html.parser import HTMLParser
 import re
 import unicodedata
 
@@ -254,3 +255,125 @@ def _not_in_entity(tok: str, cut: int) -> int:
 
 def _visible(chunk: str) -> bool:
     return bool(re.sub(r"<[^>]+>", "", chunk).strip())
+
+
+# ---------- для Mattermost: наш HTML -> Markdown, нарезка Markdown ----------
+
+_MD_SPECIAL = re.compile(r"([\\`*_~\[\]])")
+_URL = re.compile(r"(https?://\S+)")
+_INLINE = {"b": "**", "strong": "**", "i": "*", "em": "*", "s": "~~", "strike": "~~", "del": "~~"}
+
+
+class _HtmlToMd(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.bufs: list[list[str]] = [[]]  # blockquote собирает содержимое в отдельный буфер
+        self.pre = False
+        self.fence_at = -1  # индекс открывающего ``` в текущем буфере — туда допишем язык
+        self.code = False
+        self.hrefs: list[str] = []
+        self.need_nl = False
+
+    def _out(self, s: str) -> None:
+        if self.need_nl and s and not s.startswith("\n"):
+            s = "\n" + s
+        self.need_nl = False
+        self.bufs[-1].append(s)
+
+    def _ends_with_nl(self) -> bool:
+        text = "".join(self.bufs[-1])
+        return not text or text.endswith("\n")
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        a = dict(attrs)
+        if self.pre:
+            lang = (a.get("class") or "").removeprefix("language-")
+            if tag == "code" and lang and self.fence_at >= 0:
+                self.bufs[-1][self.fence_at] = "```" + lang
+            return
+        if tag in _INLINE:
+            self._out(_INLINE[tag])
+        elif tag == "code":
+            self.code = True
+            self._out("`")
+        elif tag == "pre":
+            if not self._ends_with_nl():
+                self._out("\n")
+            self._out("```")
+            self.fence_at = len(self.bufs[-1]) - 1
+            self._out("\n")
+            self.pre = True
+        elif tag == "a":
+            self.hrefs.append(a.get("href") or "")
+            self._out("[")
+        elif tag == "blockquote":
+            self.bufs.append([])
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.pre:
+            if tag == "pre":
+                if not self._ends_with_nl():
+                    self._out("\n")
+                self._out("```")
+                self.pre, self.fence_at, self.need_nl = False, -1, True
+            return
+        if tag in _INLINE:
+            self._out(_INLINE[tag])
+        elif tag == "code":
+            self.code = False
+            self._out("`")
+        elif tag == "a":
+            self._out(f"]({self.hrefs.pop() if self.hrefs else ''})")
+        elif tag == "blockquote" and len(self.bufs) > 1:
+            inner = "".join(self.bufs.pop()).strip("\n")
+            if not self._ends_with_nl():
+                self._out("\n")
+            self._out("\n".join(f"> {ln}" for ln in inner.split("\n")))
+            self.need_nl = True
+
+    def handle_data(self, data: str) -> None:
+        if self.pre or self.code:
+            self._out(data)
+            return
+        # спецсимволы Markdown в обычном тексте экранируем (кроме ссылок — иначе сломаются)
+        parts = _URL.split(data)
+        self._out("".join(p if i % 2 else _MD_SPECIAL.sub(r"\\\1", p) for i, p in enumerate(parts)))
+
+
+def html_to_md(text: str) -> str:
+    """HTML-подмножество Telegram (как пишет бот) -> Markdown для Mattermost."""
+    parser = _HtmlToMd()
+    parser.feed(text)
+    parser.close()
+    while len(parser.bufs) > 1:  # незакрытая цитата
+        inner = "".join(parser.bufs.pop())
+        parser.bufs[-1].append(inner)
+    return "".join(parser.bufs[0]).strip("\n")
+
+
+def split_md(text: str, limit: int) -> list[str]:
+    """Режет Markdown по строкам под лимит; блок кода на границе закрывается и открывается заново."""
+    out: list[str] = []
+    cur: list[str] = []
+    size = 0
+    fence: str | None = None
+    lines: list[str] = []
+    for line in text.split("\n"):  # слишком длинные строки режем как есть
+        while len(line) > limit - 10:
+            lines.append(line[: limit - 10])
+            line = line[limit - 10 :]
+        lines.append(line)
+    for line in lines:
+        if cur and size + len(line) + 1 + 4 > limit:
+            if fence is not None:
+                cur.append("```")
+            out.append("\n".join(cur).strip("\n"))
+            cur = [fence] if fence is not None else []
+            size = len(fence) + 1 if fence is not None else 0
+        cur.append(line)
+        size += len(line) + 1
+        if line.lstrip().startswith("```"):
+            fence = None if fence is not None else line.strip()
+    if cur:
+        out.append("\n".join(cur).strip("\n"))
+    return [c for c in out if c.strip()]
