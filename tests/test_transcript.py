@@ -69,3 +69,11 @@ def test_usage_parse():
     assert limits[1].resets == "Sep 26, 7:59am (UTC)"
     html = format_html(limits)
     assert "Неделя, Fable" in html and "22%" in html
+
+
+def test_exit_plan_mode_shows_plan():
+    rec = {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "ExitPlanMode", "input": {"plan": "# План\n\n- шаг 1"}},
+    ]}}
+    ev = to_events(rec, "/")
+    assert ev[0].kind == "plan" and "шаг 1" in ev[0].text

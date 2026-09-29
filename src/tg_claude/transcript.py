@@ -25,7 +25,7 @@ _ICONS = {
 
 @dataclass
 class Event:
-    kind: str  # "text" | "tool" | "user" | "info" | "title" | "local" (вывод локальной команды вроде /model)
+    kind: str  # "text" | "plan" | "tool" | "user" | "info" | "title" | "local" (вывод локальной команды вроде /model)
     text: str  # для text — markdown, для title — простой текст, для остальных — готовый HTML
     custom: bool = False  # для title: задан пользователем через /rename
 
@@ -88,6 +88,9 @@ def to_events(rec: dict, cwd: str) -> list[Event]:
         bt = block.get("type")
         if bt == "text" and block.get("text", "").strip():
             events.append(Event("text", block["text"]))
+        elif bt == "tool_use" and block.get("name") == "ExitPlanMode" and (block.get("input") or {}).get("plan"):
+            # план лежит только во входных данных инструмента — показываем его как обычный ответ
+            events.append(Event("plan", block["input"]["plan"]))
         elif bt == "tool_use" and block.get("name") not in _HIDDEN_TOOLS:
             events.append(Event("tool", tool_line(block.get("name", "?"), block.get("input") or {}, cwd)))
     return events

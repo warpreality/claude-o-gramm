@@ -65,6 +65,7 @@ class Live:
     sent_texts: deque = field(default_factory=lambda: deque(maxlen=50))
     starting: asyncio.Event = field(default_factory=asyncio.Event)
     watchdog: asyncio.Task | None = None
+    shown_plans: set = field(default_factory=set)  # планы (ExitPlanMode), уже отправленные в чат
 
 
 class SessionManager:
@@ -348,6 +349,8 @@ class SessionManager:
         elif ev.kind == "tool":
             live.activity.append(ev.text)
             live.activity_dirty = True
+        elif ev.kind == "plan":
+            await self._send_plan(live, ev.text)
         elif ev.kind == "title":
             await self._rename_topic(live, ev.text, ev.custom)
         elif ev.kind == "local":
@@ -366,6 +369,23 @@ class SessionManager:
                     await tg.send(self.bot, rec.chat_id, rec.thread_id, f"🖥 <i>из терминала:</i>\n{chunk}")
         else:
             await tg.send(self.bot, rec.chat_id, rec.thread_id, ev.text)
+
+    async def show_plan(self, key: str, plan: str) -> None:
+        """Показать план из запроса ExitPlanMode — до кнопок утверждения."""
+        live = self.live.get(key)
+        if live:
+            await self._send_plan(live, plan)
+
+    async def _send_plan(self, live: Live, plan: str) -> None:
+        # план приходит дважды: из хука (раньше) и из транскрипта (после ответа) — шлём один раз
+        digest = hash(plan.strip())
+        if digest in live.shown_plans:
+            return
+        live.shown_plans.add(digest)
+        await self._flush_activity(live, force=True)
+        live.activity_id, live.activity = None, []
+        for chunk in render("📋 **План**\n\n" + plan):
+            await tg.send(self.bot, live.rec.chat_id, live.rec.thread_id, chunk)
 
     async def _rename_topic(self, live: Live, title: str, custom: bool) -> None:
         """Называем тред в Telegram по заголовку сессии Claude."""
