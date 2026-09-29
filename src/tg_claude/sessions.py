@@ -1,4 +1,4 @@
-"""Сессии Claude в tmux: запуск, ввод, трансляция ответов в Telegram."""
+"""Сессии Claude в tmux: запуск, ввод, трансляция ответов в мессенджер."""
 
 from __future__ import annotations
 
@@ -15,12 +15,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from aiogram import Bot
-
 from . import hook as hook_module
-from . import tg, tmux
+from . import tmux
 from .config import Config
-from .render import esc, render
+from .messenger import Conv, Messenger
+from .render import esc
 from .store import SessionRec, Store
 from .transcript import find_transcript, read_new, to_events
 
@@ -35,7 +34,7 @@ _UNSET_VARS = [
 ]
 CHAT_TOOLS = "WebSearch,WebFetch,Read,AskUserQuestion"
 SYSTEM_PROMPT = (
-    "Пользователь общается с тобой через Telegram-бота: он видит только твои текстовые ответы "
+    "Пользователь общается с тобой через {platform}-бота: он видит только твои текстовые ответы "
     "и короткие строки о вызванных инструментах, но не экран терминала. Пиши обычным Markdown. "
     "Если нужно уточнение или выбор — используй инструмент AskUserQuestion, пользователь ответит кнопками. "
     "Файлы, которые пользователь присылает, сохраняются на диск, путь приходит в сообщении."
@@ -58,7 +57,7 @@ class Live:
     typing_task: asyncio.Task | None = None
     busy: bool = False
     waiting: bool = False  # ждём ответа пользователя на кнопки — «печатает» не показываем
-    activity_id: int | None = None
+    activity_id: int | str | None = None
     activity: list[str] = field(default_factory=list)
     activity_dirty: bool = False
     activity_edit_at: float = 0.0
@@ -68,10 +67,10 @@ class Live:
 
 
 class SessionManager:
-    def __init__(self, cfg: Config, store: Store, bot: Bot):
+    def __init__(self, cfg: Config, store: Store, messengers: dict[str, Messenger]):
         self.cfg = cfg
         self.store = store
-        self.bot = bot
+        self.messengers = messengers
         self.live: dict[str, Live] = {}
         (cfg.state_dir / "settings").mkdir(exist_ok=True)
         (cfg.state_dir / "chat").mkdir(exist_ok=True)
@@ -88,8 +87,16 @@ class SessionManager:
     def get(self, key: str) -> Live | None:
         return self.live.get(key)
 
+    def _m(self, rec: SessionRec) -> Messenger:
+        return self.messengers[rec.platform]
+
+    async def _say(self, rec: SessionRec, text: str) -> None:
+        await self._m(rec).send(rec.conv, text)
+
     async def restore(self) -> None:
         for rec in list(self.store.sessions.values()):
+            if rec.platform not in self.messengers:
+                continue  # платформа сейчас не настроена — сессию не трогаем
             live = self._live(rec)
             live.starting.set()
             if await tmux.has_session(rec.tmux):
@@ -97,16 +104,16 @@ class SessionManager:
                 log.info("подхватил живую сессию %s (%s)", rec.tmux, rec.title)
 
     async def start(
-        self, chat_id: int, thread_id: int, project: str | None, prompt: str | None, reaction_ids: list[int] = (),
+        self, conv: Conv, project: str | None, prompt: str | None, reaction_ids: list[int | str] = (),
     ) -> Live:
         if project is None:
-            cwd = self.cfg.state_dir / "chat" / f"{chat_id}_{thread_id}"
+            cwd = self.cfg.state_dir / "chat" / conv.slug
             cwd.mkdir(parents=True, exist_ok=True)
         else:
             cwd = self.cfg.repos_dir / project
         rec = SessionRec(
-            chat_id=chat_id, thread_id=thread_id, session_id=str(uuid.uuid4()),
-            cwd=str(cwd), project=project, tmux=f"tgc-{chat_id}-{thread_id}", pending_reactions=list(reaction_ids),
+            chat_id=conv.chat, thread_id=conv.thread, session_id=str(uuid.uuid4()), platform=conv.platform,
+            cwd=str(cwd), project=project, tmux=f"tgc-{conv.key.replace(':', '-')}", pending_reactions=list(reaction_ids),
         )
         await tmux.kill_session(rec.tmux)
         old = self.live.pop(rec.key, None)
@@ -126,7 +133,7 @@ class SessionManager:
         live.sent_texts.append(_norm(text))
         self._set_busy(live, True)
         if not await tmux.has_session(live.rec.tmux):
-            await tg.send(self.bot, live.rec.chat_id, live.rec.thread_id, "♻️ <i>Сессия была закрыта — поднимаю заново…</i>")
+            await self._say(live.rec, "♻️ <i>Сессия была закрыта — поднимаю заново…</i>")
             await self._launch(live, resume=True, prompt=text)
             return
         await self._submit(live, text)
@@ -167,10 +174,7 @@ class SessionManager:
         # нет строки ввода «❯» — значит, открыто окно (например, /cost или /config), оно блокирует ввод
         modal = not any(ln.startswith("❯") for ln in screen.splitlines())
         note = "\n<i>Закрыл это окно, можно писать дальше.</i>" if modal else ""
-        await tg.send(
-            self.bot, rec.chat_id, rec.thread_id,
-            f"🤔 <i>Claude не ответил. Вот что на экране терминала:</i>\n<pre>{esc(tail)}</pre>{note}",
-        )
+        await self._say(rec, f"🤔 <i>Claude не ответил. Вот что на экране терминала:</i>\n<pre>{esc(tail)}</pre>{note}")
         if modal:
             await tmux.send_keys(rec.tmux, "Escape")
 
@@ -209,11 +213,13 @@ class SessionManager:
         await self._flush_activity(live, force=True)
         live.activity_id, live.activity = None, []
         self._set_busy(live, False)
-        rec = live.rec
-        for mid in rec.pending_reactions:
-            await tg.react(self.bot, rec.chat_id, mid, "👍")
-        rec.pending_reactions.clear()
+        await self._react_done(live.rec)
         self.store.save()
+
+    async def _react_done(self, rec: SessionRec) -> None:
+        for mid in rec.pending_reactions:
+            await self._m(rec).react(rec.conv, mid, "👍")
+        rec.pending_reactions.clear()
 
     async def flush(self, key: str) -> None:
         """Досылаем всё, что Claude успел написать (перед вопросом/запросом разрешения)."""
@@ -224,7 +230,7 @@ class SessionManager:
             await self._drain(live, path)
             await self._flush_activity(live, force=True)
 
-    def add_pending_reaction(self, key: str, message_id: int) -> None:
+    def add_pending_reaction(self, key: str, message_id: int | str) -> None:
         live = self.live.get(key)
         if live:
             live.rec.pending_reactions.append(message_id)
@@ -261,7 +267,7 @@ class SessionManager:
                 "Stop": [{"hooks": hook("Stop", 60)}],
             }
         }
-        path = self.cfg.state_dir / "settings" / f"{rec.chat_id}_{rec.thread_id}.json"
+        path = self.cfg.state_dir / "settings" / f"{rec.conv.slug}.json"
         path.write_text(json.dumps(settings, indent=1))
         return path
 
@@ -271,7 +277,7 @@ class SessionManager:
         args += ["--permission-mode", self.cfg.permission_mode, "--settings", str(self._settings_file(rec))]
         # серые подсказки следующего сообщения в поле ввода нам не нужны (и мешают проверке ввода);
         # флаг --prompt-suggestions в интерактивном режиме не срабатывает, поэтому env + настройка
-        system = SYSTEM_PROMPT
+        system = SYSTEM_PROMPT.format(platform=self._m(rec).name)
         if rec.project is None:
             args += ["--restricted", "--tools", CHAT_TOOLS, "--strict-mcp-config", "--disable-slash-commands"]
             system += CHAT_PROMPT
@@ -294,7 +300,7 @@ class SessionManager:
         """Проходим стартовые диалоги TUI (доверие к папке, MCP) и ждём готовности."""
         ready = await wait_ready(live.rec.tmux)
         if ready is None:
-            await tg.send(self.bot, live.rec.chat_id, live.rec.thread_id, "❌ Claude не запустился. Проверь `claude` на сервере.")
+            await self._say(live.rec, "❌ Claude не запустился. Проверь <code>claude</code> на сервере.")
             self._set_busy(live, False)
             return
         if paste:
@@ -340,46 +346,40 @@ class SessionManager:
 
     async def _emit(self, live: Live, ev) -> None:
         rec = live.rec
+        m = self._m(rec)
         if ev.kind == "text":
             await self._flush_activity(live, force=True)
             live.activity_id, live.activity = None, []
-            for chunk in render(ev.text):
-                await tg.send(self.bot, rec.chat_id, rec.thread_id, chunk)
+            await m.send_markdown(rec.conv, ev.text)
         elif ev.kind == "tool":
             live.activity.append(ev.text)
             live.activity_dirty = True
         elif ev.kind == "title":
             await self._rename_topic(live, ev.text, ev.custom)
         elif ev.kind == "local":
-            await tg.send(self.bot, rec.chat_id, rec.thread_id, ev.text)
+            await m.send(rec.conv, ev.text)
             self._set_busy(live, False)
-            for mid in rec.pending_reactions:
-                await tg.react(self.bot, rec.chat_id, mid, "👍")
-            rec.pending_reactions.clear()
+            await self._react_done(rec)
         elif ev.kind == "user":
             self._set_busy(live, True)
             norm = _norm(ev.text)
             if norm in live.sent_texts:
                 live.sent_texts.remove(norm)
             else:  # напечатали прямо в терминале
-                for chunk in render(ev.text, limit=3900):
-                    await tg.send(self.bot, rec.chat_id, rec.thread_id, f"🖥 <i>из терминала:</i>\n{chunk}")
+                await m.send_markdown(rec.conv, f"🖥 *из терминала:*\n\n{ev.text}")
         else:
-            await tg.send(self.bot, rec.chat_id, rec.thread_id, ev.text)
+            await m.send(rec.conv, ev.text)
 
     async def _rename_topic(self, live: Live, title: str, custom: bool) -> None:
         """Называем тред в Telegram по заголовку сессии Claude."""
         rec = live.rec
         source = " ".join(title.split())
-        if not rec.thread_id or not source or source == rec.topic_title or (rec.custom_title and not custom):
+        if not self._m(rec).supports_rename or not rec.thread_id or not source or source == rec.topic_title or (rec.custom_title and not custom):
             return
         # Claude иногда придумывает заголовок по-английски — переводим (свой /rename не трогаем)
         title = source if custom or _CYRILLIC.search(source) else await self._translate(source)
         name = f"{rec.project} · {title}" if rec.project else f"💬 {title}"
-        try:
-            await self.bot.edit_forum_topic(rec.chat_id, rec.thread_id, name=name[:128])
-        except Exception as e:
-            log.warning("не удалось переименовать тред %s: %s", rec.key, e)
+        if not await self._m(rec).rename_thread(rec.conv, name):
             return
         rec.topic_title, rec.custom_title = source, rec.custom_title or custom
         self.store.save()
@@ -416,10 +416,9 @@ class SessionManager:
         hidden = len(live.activity) - len(lines)
         text = (f"<i>… ещё {hidden}</i>\n" if hidden else "") + "\n".join(lines)
         if live.activity_id is None:
-            msg = await tg.send(self.bot, rec.chat_id, rec.thread_id, text)
-            live.activity_id = msg.message_id if msg else None
+            live.activity_id = await self._m(rec).send(rec.conv, text)
         else:
-            await tg.edit(self.bot, rec.chat_id, live.activity_id, text)
+            await self._m(rec).edit(rec.conv, live.activity_id, text)
         live.activity_dirty = False
         live.activity_edit_at = time.monotonic()
 
@@ -435,13 +434,13 @@ class SessionManager:
         idle_checks = 0
         while live.busy:
             if not live.waiting:
-                await tg.typing(self.bot, rec.chat_id, rec.thread_id)
+                await self._m(rec).typing(rec.conv)
             await asyncio.sleep(4.5)
             if live.starting.is_set() and not await tmux.has_session(rec.tmux):
                 idle_checks += 1
                 if idle_checks >= 2:
                     live.busy = False
-                    await tg.send(self.bot, rec.chat_id, rec.thread_id, "⚠️ <i>Сессия Claude завершилась. Следующее сообщение запустит её снова.</i>")
+                    await self._say(rec, "⚠️ <i>Сессия Claude завершилась. Следующее сообщение запустит её снова.</i>")
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")

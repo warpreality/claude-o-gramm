@@ -7,23 +7,30 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .messenger import Conv
+
 
 @dataclass
 class SessionRec:
-    chat_id: int
-    thread_id: int  # 0 — основной чат без треда
+    chat_id: int | str  # tg: id чата, mm: id канала
+    thread_id: int | str  # tg: id треда (0 — основной чат), mm: id корневого поста
     session_id: str
     cwd: str
     project: str | None  # None — режим «без проекта»
     tmux: str
     offset: int = 0  # сколько байт транскрипта уже отправили в Telegram
-    pending_reactions: list[int] = field(default_factory=list)  # сообщения, ждущие 👍
+    pending_reactions: list[int | str] = field(default_factory=list)  # сообщения, ждущие 👍
     topic_title: str | None = None  # заголовок Claude (как он его написал), под которым уже назван тред
     custom_title: bool = False  # заголовок задан через /rename — ai-title его не перетирает
+    platform: str = "tg"  # "tg" | "mm"
+
+    @property
+    def conv(self) -> Conv:
+        return Conv(self.platform, self.chat_id, self.thread_id)
 
     @property
     def key(self) -> str:
-        return f"{self.chat_id}:{self.thread_id}"
+        return self.conv.key
 
     @property
     def title(self) -> str:

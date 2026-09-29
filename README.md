@@ -1,8 +1,9 @@
 # tg-claude
 
-Telegram-бот, который запускает **Claude Code** в твоих проектах и транслирует диалог в Telegram.
+Бот для **Telegram** и **Mattermost**, который запускает **Claude Code** в твоих проектах и транслирует диалог в чат.
 
 - Каждый **тред** в личке с ботом — отдельная сессия Claude в выбранном проекте.
+- Работает в Telegram, в Mattermost или в обоих сразу — одним сервисом.
 - Сессия живёт в **tmux** — переживает перезапуск бота, к ней можно подключиться с компьютера и продолжить руками.
 - Разрешения: по умолчанию **автомод** Claude, кнопки «Разрешить / Запретить» — только для реально опасного.
 - Вопросы Claude (AskUserQuestion) приходят **кнопками**.
@@ -14,12 +15,28 @@ Telegram-бот, который запускает **Claude Code** в твоих
 1. В [@BotFather](https://t.me/BotFather) создай бота → **Bot Settings → Threaded Mode → Enable** (нужны треды в личке).
 2. Узнай свой Telegram id (например, у [@userinfobot](https://t.me/userinfobot)).
 
+## Настройка Mattermost
+
+1. **System Console → Integrations → Bot Accounts** → создай бота, скопируй токен в `MM_TOKEN`.
+   Адрес сервера — в `MM_URL`, логины тех, кому можно пользоваться ботом, — в `MM_ALLOWED_USERS`.
+2. Добавь бота в команду (и в каналы, где хочешь звать его упоминанием).
+3. **Кнопки.** Нажатия Mattermost присылает боту по HTTP, поэтому сервер Mattermost должен видеть машину с ботом:
+   в `MM_CALLBACK_URL` укажи адрес бота так, как его видит Mattermost (порт — из `MM_CALLBACK_LISTEN`, по умолчанию 8765).
+   Если адрес внутренний (10.x, 192.168.x, localhost), впиши его в
+   **System Console → Environment → Developer → Allow untrusted internal connections to**, иначе кнопки не сработают.
+
+Как пользоваться в Mattermost:
+- **Личка с ботом:** каждое новое сообщение (не в треде) — новая сессия, дальше общаемся в его треде.
+- **Канал:** `@бот задача` — сессия в треде этого сообщения; в треде можно писать уже без упоминания.
+- Команды — через `!`, потому что `/…` перехватывает сам Mattermost: `!status`, `!esc`, `!stop`, `!project`, `!limits`, `!help`.
+  Остальные `!команды` уходят в Claude: `!compact` → `/compact`.
+
 ## Запуск
 
 Нужны: `tmux`, залогиненный `claude`, Python 3.12+ и [uv](https://docs.astral.sh/uv/).
 
 ```bash
-cp .env.example .env   # впиши BOT_TOKEN, ALLOWED_USER_IDS, REPOS_DIR
+cp .env.example .env   # впиши REPOS_DIR и настройки Telegram и/или Mattermost
 uv run tg-claude --repos ~/projects
 ```
 
@@ -43,7 +60,8 @@ tmux -L tg-claude attach -t tgc-<chat>-<thread>
 ## Как устроено
 
 ```
-Telegram ⇄ aiogram-бот ──tmux send-keys──▶ claude (TUI в tmux, отдельный сервер tmux -L tg-claude)
+Telegram ⇄ aiogram-бот ─┐
+Mattermost ⇄ WebSocket ─┴─tmux send-keys──▶ claude (TUI в tmux, отдельный сервер tmux -L tg-claude)
               ▲                                   │
               │ читаем ~/.claude/projects/*/<id>.jsonl (ответы, инструменты)
               └── unix-сокет ◀── хуки Claude: PermissionRequest, AskUserQuestion, Stop
