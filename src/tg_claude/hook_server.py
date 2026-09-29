@@ -49,6 +49,9 @@ class HookServer:
             self.sessions.set_waiting(key, True)
             try:
                 await self.sessions.flush(key)
+                plan = (data.get("tool_input") or {}).get("plan")
+                if event == "PermissionRequest" and data.get("tool_name") == "ExitPlanMode" and plan:
+                    await self.sessions.show_plan(key, plan)
                 if event == "PermissionRequest":
                     result = await self.interactions.ask_permission(live.rec, data)
                 elif event == "AskUserQuestion":

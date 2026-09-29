@@ -25,6 +25,7 @@ class Pending:
     multi: bool = False
     selected: set[int] = field(default_factory=set)
     suggestions: list | None = None
+    labels: dict | None = None  # подписи результата для кнопок разрешения
 
 
 class Interactions:
@@ -43,18 +44,26 @@ class Interactions:
 
     async def ask_permission(self, rec: SessionRec, data: dict) -> dict:
         tool = data.get("tool_name", "?")
-        text = "⚠️ <b>Claude просит разрешение</b>\n\n" + describe_tool(tool, data.get("tool_input") or {})
         suggestions = data.get("permission_suggestions") or None
         pid = secrets.token_hex(4)
-        row = [("✅ Разрешить", f"p:{pid}:y")]
-        if suggestions:
-            row.append(("✅ Всегда", f"p:{pid}:a"))
-        row.append(("❌ Запретить", f"p:{pid}:n"))
+        is_plan = tool == "ExitPlanMode"
+        if is_plan:  # сам план уже отправлен сообщением выше
+            text = "📋 <b>План готов</b> — он в сообщении выше. Выполнять?"
+            row = [("✅ Выполнять", f"p:{pid}:y"), ("✏️ Доработать", f"p:{pid}:n")]
+            labels = {"y": "✅ План утверждён", "n": "✏️ План не утверждён — напиши, что поменять"}
+            suggestions = None
+        else:
+            text = "⚠️ <b>Claude просит разрешение</b>\n\n" + describe_tool(tool, data.get("tool_input") or {})
+            row = [("✅ Разрешить", f"p:{pid}:y")]
+            if suggestions:
+                row.append(("✅ Всегда", f"p:{pid}:a"))
+            row.append(("❌ Запретить", f"p:{pid}:n"))
+            labels = None
         mid = await self._send(rec, text, [row])
         if mid is None:
             return {}
         fut = asyncio.get_running_loop().create_future()
-        self.pending[pid] = Pending("perm", rec, mid, text, fut, suggestions=suggestions)
+        self.pending[pid] = Pending("perm", rec, mid, text, fut, suggestions=suggestions, labels=labels)
         try:
             choice = await asyncio.wait_for(fut, TIMEOUT)
         except TimeoutError:
@@ -62,7 +71,12 @@ class Interactions:
             await self._edit(rec, mid, text + "\n\n⌛ <i>Нет ответа — запрещено</i>")
         finally:
             self.pending.pop(pid, None)
-        if choice == "n":
+        if choice == "n" and is_plan:
+            decision = {"behavior": "deny", "message": (
+                "Пользователь не утвердил план. Не начинай выполнение, оставайся в режиме планирования "
+                "и дождись его следующего сообщения с правками."
+            )}
+        elif choice == "n":
             decision = {"behavior": "deny", "message": "Пользователь запретил это действие в Telegram."}
         else:
             decision = {"behavior": "allow"}
@@ -136,7 +150,7 @@ class Interactions:
             return "Вопрос уже неактуален", True
         rec = p.rec
         if kind == "p":
-            label = {"y": "✅ Разрешено", "a": "✅ Разрешено навсегда", "n": "❌ Запрещено"}[value]
+            label = (p.labels or {"y": "✅ Разрешено", "a": "✅ Разрешено навсегда", "n": "❌ Запрещено"})[value]
             await self._edit(rec, p.message_id, f"{p.text}\n\n<b>{label}</b>")
             p.future.set_result(value)
             return label, False
