@@ -8,6 +8,8 @@ import logging
 import shutil
 import signal
 
+import aiohttp
+
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import BotCommand
@@ -17,7 +19,7 @@ from .bot import BotApp
 from .config import Config
 from .core import ChatCore
 from .hook_server import HookServer
-from .mattermost import Mattermost
+from .mattermost import Mattermost, MMError
 from .messenger import Messenger
 from .questions import Interactions
 from .sessions import SessionManager
@@ -41,6 +43,19 @@ async def run(cfg: Config) -> None:
     interactions = Interactions(messengers)
     hooks = HookServer(sessions, interactions, cfg.socket_path)
     core = ChatCore(cfg, sessions, interactions, messengers)
+    if mm:
+        mm.attach(core)
+        # Mattermost недоступен — ожидаемая ситуация (сервер лежит, неверный токен, занят порт):
+        # пишем понятную ошибку и работаем без него, а не роняем заодно Telegram
+        try:
+            await asyncio.wait_for(mm.start(), 30)
+        except (MMError, aiohttp.ClientError, OSError, TimeoutError) as e:
+            log.error("Mattermost недоступен, работаю без него: %s", e or "нет ответа за 30с")
+            await mm.close()
+            messengers.pop("mm")
+            mm = None
+            if not bot:
+                raise SystemExit(f"Mattermost недоступен ({e or 'нет ответа за 30с'}), а Telegram не настроен — запускать нечего")
 
     await hooks.start()
     await sessions.restore()
@@ -63,8 +78,6 @@ async def run(cfg: Config) -> None:
                 bot, allowed_updates=["message", "edited_message", "callback_query"], handle_signals=False,
             ), name="telegram"))
         if mm:
-            mm.attach(core)
-            await mm.start()
             jobs.append(asyncio.create_task(mm.run(), name="mattermost"))
 
         stop = asyncio.Event()

@@ -136,3 +136,39 @@ def test_core_first_message_shows_picker_and_pages():
     labels2 = [label for row in page2 for label, _ in row]
     assert labels2[:2] == ["proj8", "proj9"] and "◀️" in labels2
     assert answers == [None]
+
+
+def test_file_download_keeps_json_raw(tmp_path):
+    """Вложение .json отдаётся сервером как application/json — скачать надо байты, а не dict."""
+    import asyncio
+
+    import aiohttp
+    from aiohttp import web
+
+    from tg_claude.config import Config
+    from tg_claude.mattermost import Mattermost
+
+    async def serve_file(request):
+        return web.json_response({"a": 1})
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_get("/api/v4/files/f1", serve_file)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        cfg = Config(bot_token="", allowed_users=set(), repos_dir=tmp_path, state_dir=tmp_path,
+                     claude_bin="claude", permission_mode="auto", extra_args=[], mm_url=f"http://127.0.0.1:{port}")
+        mm = Mattermost(cfg)
+        mm.http = aiohttp.ClientSession()
+        try:
+            (ref,) = mm._files({"file_ids": ["f1"], "metadata": {"files": [{"id": "f1", "name": "config.json"}]}})
+            await ref.fetch(tmp_path / "config.json")
+        finally:
+            await mm.http.close()
+            await runner.cleanup()
+        return (tmp_path / "config.json").read_bytes()
+
+    assert asyncio.run(scenario()) == b'{"a": 1}'

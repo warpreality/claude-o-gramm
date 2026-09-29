@@ -74,7 +74,8 @@ class Mattermost:
 
     # ---------- REST ----------
 
-    async def _api(self, method: str, path: str, **kw):
+    async def _api(self, method: str, path: str, raw: bool = False, **kw):
+        """raw=True — вернуть тело как есть (файлы: .json-вложение не должно парситься)."""
         for attempt in range(5):
             async with self.http.request(method, self.base + path, **kw) as r:
                 if r.status == 429 and attempt < 4:
@@ -82,7 +83,7 @@ class Mattermost:
                     continue
                 if r.status >= 400:
                     raise MMError(f"{method} {path}: {r.status} {(await r.text())[:300]}")
-                if r.content_type == "application/json":
+                if not raw and r.content_type == "application/json":
                     return await r.json()
                 return await r.read()
 
@@ -258,7 +259,7 @@ class Mattermost:
         files = []
         for fid in post.get("file_ids") or []:
             async def fetch(path: Path, fid=fid) -> None:
-                path.write_bytes(await self._api("GET", f"/files/{fid}"))
+                path.write_bytes(await self._api("GET", f"/files/{fid}", raw=True))
             files.append(FileRef(infos.get(fid, fid), fetch))
         return files
 
