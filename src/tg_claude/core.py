@@ -44,7 +44,7 @@ def help_text(m: Messenger) -> str:
         "Команды в треде:\n"
         f"{p}status — что за сессия и как подключиться к ней с компьютера\n"
         f"{p}esc — прервать текущий ответ\n"
-        f"{p}stop — закрыть сессию (следующее сообщение предложит выбрать проект заново)\n"
+        f"{p}stop — закрыть сессию{' и удалить тред (спрошу подтверждение)' if m.supports_delete_thread else ''}\n"
         f"{p}project — выбрать или сменить проект в этом треде\n"
         f"{p}limits — сколько осталось лимитов подписки Claude\n"
         f"{new}\n"
@@ -128,13 +128,44 @@ class ChatCore:
         ))
 
     async def cmd_stop(self, inc: Incoming) -> None:
-        key = inc.conv.key
-        self.pending.pop(key, None)
-        if not self.sessions.get(key):
-            await self.say(inc.conv, "Здесь и так нет сессии.")
+        conv, key = inc.conv, inc.conv.key
+        has_session = bool(self.sessions.get(key))
+        can_delete = self._m(conv).supports_delete_thread and bool(conv.thread)
+        if not can_delete:
+            # удалить тред нельзя (Mattermost или основной чат) — просто закрываем сессию, как раньше
+            self.pending.pop(key, None)
+            if not has_session:
+                await self.say(conv, "Здесь и так нет сессии.")
+                return
+            await self.sessions.stop(key)
+            await self.say(conv, "⏹ Сессия закрыта. Следующее сообщение предложит выбрать проект.")
             return
-        await self.sessions.stop(key)
-        await self.say(inc.conv, "⏹ Сессия закрыта. Следующее сообщение предложит выбрать проект.")
+        rows = [[("🗑 Да, удалить тред", "st:del")]]
+        if has_session:
+            rows.append([("⏹ Нет, только закрыть сессию", "st:stop")])
+        rows.append([("↩️ Отмена", "st:no")])
+        what = "Закрыть сессию Claude и удалить этот тред" if has_session else "Удалить этот тред"
+        await self.say(conv, f"🗑 {what} вместе со всей перепиской? Это нельзя отменить.", rows)
+
+    async def _on_stop(self, conv: Conv, message_id: MsgId, data: str, answer: Answer) -> None:
+        key, m = conv.key, self._m(conv)
+        if data == "st:no":
+            await answer("Отменено")
+            await m.edit(conv, message_id, "↩️ Отменено, всё осталось как было.")
+            return
+        await answer()
+        self.pending.pop(key, None)
+        self.pickers.pop(key, None)
+        if self.sessions.get(key):
+            await self.sessions.stop(key)
+        if data == "st:stop":
+            await m.edit(conv, message_id, "⏹ Сессия закрыта. Следующее сообщение предложит выбрать проект.")
+            return
+        try:
+            await m.delete_thread(conv)
+        except Exception as e:
+            log.warning("не удалось удалить тред %s: %s", key, e)
+            await m.edit(conv, message_id, f"⏹ Сессия закрыта, но тред удалить не получилось: {esc(str(e))}")
 
     async def cmd_esc(self, inc: Incoming) -> None:
         if self.sessions.get(inc.conv.key):
@@ -192,6 +223,8 @@ class ChatCore:
     async def on_button(self, conv: Conv, message_id: MsgId, data: str, answer: Answer) -> None:
         if data.startswith(("pj:", "ps:", "pc")):
             await self._on_pick(conv, message_id, data, answer)
+        elif data.startswith("st:"):
+            await self._on_stop(conv, message_id, data, answer)
         elif data.startswith(("p:", "q:")):
             text, alert = await self.interactions.on_callback(data)
             await answer(text or None, alert)

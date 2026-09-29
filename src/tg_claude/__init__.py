@@ -68,7 +68,7 @@ async def run(cfg: Config) -> None:
                 BotCommand(command="status", description="Статус сессии в этом треде"),
                 BotCommand(command="limits", description="Лимиты подписки Claude"),
                 BotCommand(command="esc", description="Прервать текущий ответ"),
-                BotCommand(command="stop", description="Закрыть сессию"),
+                BotCommand(command="stop", description="Закрыть сессию и удалить тред"),
                 BotCommand(command="help", description="Помощь"),
             ])
             me = await bot.get_me()

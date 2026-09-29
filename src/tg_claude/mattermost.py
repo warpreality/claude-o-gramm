@@ -52,6 +52,7 @@ class Mattermost:
     name = "Mattermost"
     cmd_prefix = "!"
     supports_rename = False
+    supports_delete_thread = False  # корневой пост пользователя бот удалить не может
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -184,6 +185,9 @@ class Mattermost:
 
     async def new_thread(self, conv: Conv, title: str) -> Conv:
         raise RuntimeError("в Mattermost новая сессия — просто новое сообщение вне треда")
+
+    async def delete_thread(self, conv: Conv) -> None:
+        raise RuntimeError("в Mattermost бот не может удалить тред")
 
     # ---------- входящие ----------
 

@@ -88,6 +88,7 @@ class TelegramMessenger:
     name = "Telegram"
     cmd_prefix = "/"
     supports_rename = True
+    supports_delete_thread = True
 
     def __init__(self, bot: Bot):
         self.bot = bot
@@ -125,3 +126,6 @@ class TelegramMessenger:
         except Exception as e:
             raise RuntimeError(f"{e}\n\nВключи Threaded Mode боту в @BotFather или создай тред вручную.") from e
         return Conv("tg", conv.chat, topic.message_thread_id)
+
+    async def delete_thread(self, conv: Conv) -> None:
+        await self.bot.delete_forum_topic(conv.chat, conv.thread)

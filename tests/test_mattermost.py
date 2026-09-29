@@ -75,6 +75,7 @@ def test_split_md_short_text_untouched():
 
 class FakeMessenger:
     platform, name, cmd_prefix, supports_rename = "mm", "Mattermost", "!", False
+    supports_delete_thread = False
 
     def __init__(self):
         self.sent, self.edits, self.reactions = [], [], []
