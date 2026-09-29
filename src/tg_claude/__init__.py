@@ -35,6 +35,8 @@ async def run(cfg: Config) -> None:
     if cfg.bot_token:
         bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode="HTML"))
         messengers["tg"] = TelegramMessenger(bot)
+    if cfg.mm_error:
+        log.error("Mattermost выключен: %s", cfg.mm_error)
     if cfg.mm_url:
         mm = Mattermost(cfg)
         messengers["mm"] = mm

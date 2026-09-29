@@ -21,6 +21,7 @@ class Config:
     mm_users: set[str] = field(default_factory=set)  # логины без @
     mm_listen: str = "0.0.0.0:8765"  # где слушать нажатия кнопок
     mm_callback_url: str = ""  # как этот адрес видит сервер Mattermost
+    mm_error: str = ""  # почему Mattermost выключен при неполных настройках
 
     @property
     def socket_path(self) -> Path:
@@ -36,13 +37,19 @@ class Config:
         mm_token = os.environ.get("MM_TOKEN", "").strip()
         mm_users = {x.lstrip("@").lower() for x in os.environ.get("MM_ALLOWED_USERS", "").replace(" ", "").split(",") if x}
         mm_callback = os.environ.get("MM_CALLBACK_URL", "").strip()
+        mm_error = ""
         if mm_url or mm_token:
             if not (mm_url and mm_token):
-                raise SystemExit("Для Mattermost нужны оба: MM_URL и MM_TOKEN")
-            if not mm_users:
-                raise SystemExit("MM_ALLOWED_USERS не задан — без него бот ответил бы кому угодно")
-            if not mm_callback:
-                raise SystemExit("MM_CALLBACK_URL не задан — без него в Mattermost не будут работать кнопки")
+                mm_error = "для Mattermost нужны оба: MM_URL и MM_TOKEN"
+            elif not mm_users:
+                mm_error = "MM_ALLOWED_USERS не задан — без него бот ответил бы кому угодно"
+            elif not mm_callback:
+                mm_error = "MM_CALLBACK_URL не задан — без него в Mattermost не работают кнопки (выбор проекта, разрешения)"
+        if mm_error:
+            # неполные настройки Mattermost не должны ронять Telegram: выключаем только Mattermost
+            if not token:
+                raise SystemExit(f"Mattermost: {mm_error}")
+            mm_url = mm_token = ""
         if not token and not mm_url:
             raise SystemExit("Не настроен ни Telegram (BOT_TOKEN), ни Mattermost (MM_URL, MM_TOKEN) — см. .env.example")
         repos = Path(repos_dir or os.environ.get("REPOS_DIR", "")).expanduser()
@@ -65,4 +72,5 @@ class Config:
             mm_users=mm_users,
             mm_listen=os.environ.get("MM_CALLBACK_LISTEN", "0.0.0.0:8765").strip(),
             mm_callback_url=mm_callback,
+            mm_error=mm_error,
         )
