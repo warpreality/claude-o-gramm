@@ -11,6 +11,7 @@ from pathlib import Path
 from .messenger import Conv
 
 log = logging.getLogger(__name__)
+SCRATCH_TITLE = "🗂 пустая папка"
 
 
 @dataclass
@@ -26,6 +27,7 @@ class SessionRec:
     topic_title: str | None = None  # заголовок Claude (как он его написал), под которым уже назван тред
     custom_title: bool = False  # заголовок задан через /rename — ai-title его не перетирает
     platform: str = "tg"  # "tg" | "mm"
+    scratch: bool = False  # режим «пустая папка»: временная папка, все инструменты и MCP
 
     @property
     def conv(self) -> Conv:
@@ -37,6 +39,8 @@ class SessionRec:
 
     @property
     def title(self) -> str:
+        if self.scratch:
+            return SCRATCH_TITLE
         return self.project or "💬 без проекта"
 
 

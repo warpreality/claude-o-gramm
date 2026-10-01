@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import sys
 import time
 import uuid
@@ -42,6 +43,10 @@ SYSTEM_PROMPT = (
 CHAT_PROMPT = (
     " Сейчас режим «без проекта»: доступны только веб-поиск, загрузка страниц и чтение присланных файлов; "
     "доступа к проектам и командам нет."
+)
+SCRATCH_PROMPT = (
+    " Сейчас режим «пустая папка»: проекта нет, рабочая папка — пустая временная, она удалится при закрытии сессии. "
+    "Доступны все инструменты и MCP-серверы — работай как в обычном чате с Claude."
 )
 _CYRILLIC = re.compile("[а-яё]", re.I)
 IDLE_HOURS = float(os.environ.get("TGC_IDLE_HOURS", "6"))  # 0 — не закрывать простаивающие сессии
@@ -81,6 +86,7 @@ class SessionManager:
         self._reaper: asyncio.Task | None = None
         (cfg.state_dir / "settings").mkdir(exist_ok=True)
         (cfg.state_dir / "chat").mkdir(exist_ok=True)
+        (cfg.state_dir / "scratch").mkdir(exist_ok=True)
         (cfg.state_dir / "uploads").mkdir(exist_ok=True)
 
     # ---------- публичное API ----------
@@ -134,10 +140,18 @@ class SessionManager:
         task.add_done_callback(self._bg.discard)
         return task
 
+    def scratch_dir(self, conv: Conv) -> Path:
+        return self.cfg.state_dir / "scratch" / conv.slug
+
     async def start(
         self, conv: Conv, project: str | None, prompt: str | None, reaction_ids: list[int | str] = (),
+        scratch: bool = False,
     ) -> Live:
-        if project is None:
+        if scratch:
+            cwd = self.scratch_dir(conv)
+            shutil.rmtree(cwd, ignore_errors=True)  # каждая сессия — с чистого листа
+            cwd.mkdir(parents=True, exist_ok=True)
+        elif project is None:
             cwd = self.cfg.state_dir / "chat" / conv.slug
             cwd.mkdir(parents=True, exist_ok=True)
         else:
@@ -145,6 +159,7 @@ class SessionManager:
         rec = SessionRec(
             chat_id=conv.chat, thread_id=conv.thread, session_id=str(uuid.uuid4()), platform=conv.platform,
             cwd=str(cwd), project=project, tmux=f"tgc-{conv.key.replace(':', '-')}", pending_reactions=list(reaction_ids),
+            scratch=scratch,
         )
         await tmux.kill_session(rec.tmux)
         old = self.live.pop(rec.key, None)
@@ -221,6 +236,8 @@ class SessionManager:
         if live:
             self._cancel(live)
             await tmux.kill_session(live.rec.tmux)
+            if live.rec.scratch:
+                shutil.rmtree(live.rec.cwd, ignore_errors=True)  # временная папка больше не нужна
         self.store.drop(key)
 
     def on_turn_end(self, key: str) -> None:
@@ -312,7 +329,9 @@ class SessionManager:
         # серые подсказки следующего сообщения в поле ввода нам не нужны (и мешают проверке ввода);
         # флаг --prompt-suggestions в интерактивном режиме не срабатывает, поэтому env + настройка
         system = SYSTEM_PROMPT.format(platform=self._m(rec).name)
-        if rec.project is None:
+        if rec.scratch:
+            system += SCRATCH_PROMPT
+        elif rec.project is None:
             args += ["--restricted", "--tools", CHAT_TOOLS, "--strict-mcp-config", "--disable-slash-commands"]
             system += CHAT_PROMPT
         args += ["--append-system-prompt", system, *self.cfg.extra_args]

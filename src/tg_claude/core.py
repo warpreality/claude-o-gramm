@@ -13,6 +13,7 @@ from .messenger import Buttons, Conv, Incoming, Messenger, MsgId
 from .questions import Interactions
 from .render import esc
 from .sessions import SessionManager
+from .store import SCRATCH_TITLE
 
 log = logging.getLogger(__name__)
 PAGE = 8
@@ -40,6 +41,7 @@ def help_text(m: Messenger) -> str:
     return (
         "👋 Я запускаю <b>Claude Code</b> в твоих проектах.\n\n"
         f"{where}"
+        "• «🗂 Пустая папка» — как обычный чат с Claude: все MCP и инструменты, чистая временная папка.\n"
         "• «💬 Без проекта» — просто чат с веб-поиском, без доступа к файлам.\n\n"
         "Команды в треде:\n"
         f"{p}status — что за сессия и как подключиться к ней с компьютера\n"
@@ -222,7 +224,7 @@ class ChatCore:
     # ---------- кнопки ----------
 
     async def on_button(self, conv: Conv, message_id: MsgId, data: str, answer: Answer) -> None:
-        if data.startswith(("pj:", "ps:", "pc")):
+        if data.startswith(("pj:", "ps:", "pc", "pt")):
             await self._on_pick(conv, message_id, data, answer)
         elif data.startswith("st:"):
             await self._on_stop(conv, message_id, data, answer)
@@ -257,6 +259,7 @@ class ChatCore:
             nav.append(("▶️", f"pj:{page + 1}{sfx}"))
         if nav:
             rows.append(nav)
+        rows.append([("🗂 Пустая папка (чат + все MCP)", f"pt{sfx}")])
         rows.append([("💬 Без проекта (чат + веб-поиск)", f"pc{sfx}")])
         return rows
 
@@ -287,20 +290,25 @@ class ChatCore:
                 await answer(f"Сессия уже запущена. Сменить проект — {m.cmd_prefix}project", True)
                 return
             await self.sessions.stop(key)
-        project = None if data == "pc" else projects[int(data[3:])]
+        scratch = data == "pt"
+        project = None if data in ("pc", "pt") else projects[int(data[3:])]
         if project is not None and not (self.cfg.repos_dir / project).is_dir():
             await answer("Папка пропала", True)
             return
         await answer()
         self.pickers.pop(key, None)
-        title = project or "💬 без проекта"
+        title = SCRATCH_TITLE if scratch else project or "💬 без проекта"
         await m.edit(conv, message_id, f"🚀 Запускаю Claude: <b>{esc(title)}</b>…")
         messages = self.pending.pop(key, [])
-        chat_dir = self.cfg.state_dir / "chat" / conv.slug if project is None else None
+        if scratch:
+            chat_dir = self.sessions.scratch_dir(conv)
+        else:
+            chat_dir = self.cfg.state_dir / "chat" / conv.slug if project is None else None
         prompts = [p for p in [await self._prompt_of(inc, chat_dir) for inc in messages] if p]
         try:
             await self.sessions.start(
-                conv, project, "\n\n".join(prompts) or None, reaction_ids=[inc.message_id for inc in messages]
+                conv, project, "\n\n".join(prompts) or None, reaction_ids=[inc.message_id for inc in messages],
+                scratch=scratch,
             )
         except Exception as e:
             log.exception("не удалось запустить сессию")

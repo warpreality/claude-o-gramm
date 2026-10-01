@@ -78,7 +78,7 @@ def test_double_tap_on_project_starts_session_once(tmp_path):
         def get(self, key):
             return None
 
-        async def start(self, conv, project, prompt, reaction_ids=()):
+        async def start(self, conv, project, prompt, reaction_ids=(), scratch=False):
             starts.append(project)
             await asyncio.sleep(0.05)  # запуск Claude занимает время — второе нажатие приходит в это окно
 
