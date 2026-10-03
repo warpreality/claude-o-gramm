@@ -25,6 +25,12 @@ from .render import html_to_md, split_md
 log = logging.getLogger(__name__)
 LIMIT = 15000  # у Mattermost по умолчанию 16383 символа на пост
 _EMOJI = {"👀": "eyes", "👍": "+1"}
+AUDIO_EXT = {"ogg", "oga", "opus", "mp3", "m4a", "wav", "webm"}
+
+
+def is_audio(name: str, mime: str) -> bool:
+    """Голосовое/аудио в Mattermost — обычный файл; узнаём его по типу или расширению."""
+    return mime.startswith("audio/") or name.rsplit(".", 1)[-1].lower() in AUDIO_EXT
 
 
 class MMError(RuntimeError):
@@ -259,12 +265,14 @@ class Mattermost:
                 log.exception("Mattermost: ошибка обработки сообщения")
 
     def _files(self, post: dict) -> list[FileRef]:
-        infos = {f["id"]: f.get("name") or f["id"] for f in (post.get("metadata") or {}).get("files") or []}
+        infos = {f["id"]: f for f in (post.get("metadata") or {}).get("files") or []}
         files = []
         for fid in post.get("file_ids") or []:
             async def fetch(path: Path, fid=fid) -> None:
                 path.write_bytes(await self._api("GET", f"/files/{fid}", raw=True))
-            files.append(FileRef(infos.get(fid, fid), fetch))
+            info = infos.get(fid, {})
+            name = info.get("name") or fid
+            files.append(FileRef(name, fetch, voice=is_audio(name, info.get("mime_type", ""))))
         return files
 
     # ---------- нажатия кнопок ----------
