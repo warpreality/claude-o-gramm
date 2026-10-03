@@ -38,6 +38,7 @@ class Conv:
 class FileRef:
     name: str
     fetch: Callable[[Path], Awaitable[None]]  # скачать в указанный путь
+    voice: bool = False  # голосовое/аудио — расшифровываем в текст
 
 
 @dataclass

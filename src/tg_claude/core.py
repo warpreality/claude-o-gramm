@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import tmux, usage
+from . import tmux, usage, voice
 from .config import Config
 from .messenger import Buttons, Conv, Incoming, Messenger, MsgId
 from .questions import Interactions
@@ -184,6 +184,10 @@ class ChatCore:
         conv, key = inc.conv, inc.conv.key
         m = self._m(conv)
         await m.react(conv, inc.message_id, "👀")
+        if any(f.voice for f in inc.files):
+            await self._transcribe_voice(inc)
+            if not inc.text and not inc.files:
+                return
         if inc.text and self.interactions.take_text_answer(key, inc.text):
             await m.react(conv, inc.message_id, "👍")
             return
@@ -202,6 +206,33 @@ class ChatCore:
         self.pending.setdefault(key, []).append(inc)
         if first:
             await self._show_picker(conv, "В каком проекте работаем?")
+
+    async def _transcribe_voice(self, inc: Incoming) -> None:
+        """Голосовые превращаем в текст сообщения — дальше оно идёт как обычное."""
+        conv, m = inc.conv, self._m(inc.conv)
+        folder = self.cfg.state_dir / "voice"
+        folder.mkdir(parents=True, exist_ok=True)
+        texts = []
+        for f in [f for f in inc.files if f.voice]:
+            inc.files.remove(f)
+            path = folder / f"{conv.slug}_{inc.message_id}_{Path(f.name).name}"
+            try:
+                await f.fetch(path)
+                await m.typing(conv)
+                text = await voice.transcribe(path)
+            except Exception as e:
+                log.warning("не удалось расшифровать %s: %s", f.name, e)
+                await self.say(conv, f"Не смог расшифровать голосовое: {esc(str(e))}")
+                continue
+            finally:
+                path.unlink(missing_ok=True)
+            if not text:
+                await self.say(conv, "🎙 В голосовом не разобрал слов — попробуй ещё раз или напиши текстом.")
+                continue
+            shown = text if len(text) <= 3500 else text[:3500] + "…"  # лимит сообщения Telegram — 4096
+            await self.say(conv, f"🎙 <i>{esc(shown)}</i>")
+            texts.append(text)
+        inc.text = "\n\n".join([inc.text, *texts]).strip()
 
     async def _prompt_of(self, inc: Incoming, chat_dir: Path | None) -> str:
         text = inc.text

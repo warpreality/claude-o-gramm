@@ -62,7 +62,7 @@ class BotApp:
             names = [name, *(a for a, n in ALIASES.items() if n == name and a != "start")]
             router.message(Command(*names))(self._command(name))
         router.message(F.text | F.photo | F.document | F.caption | F.func(rich_of))(self.on_message)
-        router.message(F.voice | F.video_note | F.audio)(self.on_voice)
+        router.message(F.voice | F.video_note | F.audio)(self.on_message)
         router.message()(self.on_unsupported)
         router.edited_message.filter(allowed)
         router.edited_message()(self.on_edited)
@@ -80,6 +80,17 @@ class BotApp:
                 await self.bot.download(file, destination=path)
 
             files.append(FileRef(name, fetch))
+        mid = message.message_id
+        for audio, name in (
+            (message.voice, f"voice_{mid}.ogg"),
+            (message.video_note, f"circle_{mid}.mp4"),
+            (message.audio, message.audio and (message.audio.file_name or f"audio_{mid}.mp3")),
+        ):
+            if audio:
+                async def fetch(path: Path, audio=audio) -> None:
+                    await self.bot.download(audio, destination=path)
+
+                files.append(FileRef(name, fetch, voice=True))
         return Incoming(conv_of(message), message.message_id, _text_of(message), files)
 
     def _command(self, name: str):
@@ -97,9 +108,6 @@ class BotApp:
 
     async def on_edited(self, message: Message) -> None:
         await self.core.on_edited(conv_of(message))
-
-    async def on_voice(self, message: Message) -> None:
-        await self.core.say(conv_of(message), "Голосовые пока не понимаю — напиши текстом 🙏")
 
     async def on_button(self, cb: CallbackQuery) -> None:
         answered = False
