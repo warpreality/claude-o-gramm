@@ -8,7 +8,9 @@ import logging
 import re
 
 from aiogram import Bot
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.methods import GetUpdates
 from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions, Message, ReactionTypeEmoji
 
@@ -30,6 +32,21 @@ async def _retry(call, *args, **kwargs):
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 0.5)
     return await call(*args, **kwargs)
+
+
+class PollingFloodWait(BaseRequestMiddleware):
+    """aiogram на flood control в getUpdates не ждёт retry_after, а повторяет через 1–5с —
+    каждый такой повтор продлевает бан. Ждём столько, сколько просит Telegram."""
+
+    async def __call__(self, make_request, bot, method):
+        if not isinstance(method, GetUpdates):
+            return await make_request(bot, method)
+        while True:
+            try:
+                return await make_request(bot, method)
+            except TelegramRetryAfter as e:
+                log.warning("Telegram просит подождать %sс перед getUpdates — жду", e.retry_after)
+                await asyncio.sleep(e.retry_after + 0.5)
 
 
 async def send(
