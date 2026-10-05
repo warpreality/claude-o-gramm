@@ -24,7 +24,7 @@ from .messenger import Messenger
 from .questions import Interactions
 from .sessions import SessionManager
 from .store import Store
-from .tg import TelegramMessenger
+from .tg import PollingFloodWait, TelegramMessenger
 
 log = logging.getLogger("tg_claude")
 
@@ -34,6 +34,7 @@ async def run(cfg: Config) -> None:
     bot = mm = None
     if cfg.bot_token:
         bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode="HTML"))
+        bot.session.middleware(PollingFloodWait())
         messengers["tg"] = TelegramMessenger(bot)
     if cfg.mm_error:
         log.error("Mattermost выключен: %s", cfg.mm_error)

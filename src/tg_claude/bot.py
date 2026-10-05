@@ -25,7 +25,8 @@ async def _log_update(handler, update, data):
         text = _text_of(msg)
         log.info("входящее %s [%s:%s] от %s: %d симв. %r", kind, msg.chat.id, msg.message_thread_id or 0,
                  msg.from_user.id if msg.from_user else "?", len(text), text[:60])
-        if not text:  # непонятное сообщение — пишем его целиком, чтобы разобраться
+        service = msg.forum_topic_created or msg.forum_topic_edited or msg.pinned_message
+        if not text and not service:  # непонятное сообщение — пишем его целиком, чтобы разобраться
             log.info("содержимое: %s", msg.model_dump_json(exclude_none=True)[:3000])
     elif update.callback_query:
         log.info("кнопка %r от %s", update.callback_query.data, update.callback_query.from_user.id)
