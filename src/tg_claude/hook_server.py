@@ -23,6 +23,7 @@ class HookServer:
     async def start(self) -> None:
         app = web.Application()
         app.router.add_post("/hook/{event}", self.handle)
+        app.router.add_post("/send-file", self.send_file)
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
         self.socket_path.unlink(missing_ok=True)
@@ -32,6 +33,23 @@ class HookServer:
     async def stop(self) -> None:
         if self.runner:
             await self.runner.cleanup()
+
+    async def send_file(self, request: web.Request) -> web.Response:
+        """Команда send-file из сессии Claude: отправить файл в тред этой сессии."""
+        key = request.query.get("key", "")
+        data = await request.json()
+        if not self.sessions.get(key):
+            return web.json_response({"error": "сессия не найдена — файл не отправлен"})
+        path = Path(data.get("path") or "")
+        if not path.is_absolute() or not path.is_file():
+            return web.json_response({"error": f"файл не найден: {path}"})
+        log.info("send-file [%s] %s", key, path)
+        try:
+            await self.sessions.send_file(key, path, data.get("caption") or "")
+        except Exception as e:
+            log.warning("send-file [%s] не удалось: %s", key, e)
+            return web.json_response({"error": str(e) or type(e).__name__})
+        return web.json_response({"ok": True})
 
     async def handle(self, request: web.Request) -> web.Response:
         event = request.match_info["event"]

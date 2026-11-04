@@ -152,6 +152,25 @@ class Mattermost:
         for chunk in split_md(text, LIMIT):
             await self._post(conv, chunk)
 
+    async def send_file(self, conv: Conv, path: Path, caption: str = "") -> None:
+        for attempt in range(5):
+            with path.open("rb") as f:
+                form = aiohttp.FormData()
+                form.add_field("channel_id", str(conv.chat))
+                form.add_field("files", f, filename=path.name)
+                async with self.http.post(self.base + "/files", data=form) as r:
+                    if r.status == 429 and attempt < 4:
+                        await asyncio.sleep(1 + attempt)
+                        continue
+                    if r.status == 413:
+                        raise MMError("файл слишком большой для этого сервера Mattermost; сожми или раздели его")
+                    if r.status >= 400:
+                        raise MMError(f"загрузка файла: {r.status} {(await r.text())[:300]}")
+                    file_id = (await r.json())["file_infos"][0]["id"]
+                    break
+        body = {"channel_id": conv.chat, "root_id": conv.thread, "message": caption[:LIMIT], "file_ids": [file_id]}
+        await self._api("POST", "/posts", json=body)
+
     async def edit(self, conv: Conv, message_id: str, text: str, buttons: Buttons | None = None) -> None:
         body = {"message": html_to_md(text)[:LIMIT], "props": self._props(conv, buttons)}
         try:
