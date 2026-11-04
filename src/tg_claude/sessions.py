@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import hook as hook_module
+from . import send_file as send_file_module
 from . import tmux
 from .config import Config
 from .messenger import Conv, Messenger
@@ -39,6 +40,11 @@ SYSTEM_PROMPT = (
     "и короткие строки о вызванных инструментах, но не экран терминала. Пиши обычным Markdown. "
     "Если нужно уточнение или выбор — используй инструмент AskUserQuestion, пользователь ответит кнопками. "
     "Файлы, которые пользователь присылает, сохраняются на диск, путь приходит в сообщении."
+)
+FILES_PROMPT = (
+    " Чтобы отправить пользователю файл в чат (отчёт, картинку, архив, документ), выполни в терминале "
+    "`send-file <путь> [подпись]` — файл придёт в этот тред, картинки — с превью. Путь в тексте ответа "
+    "пользователь открыть не может, поэтому готовые файлы, которые он просит или которые ему нужны, отправляй так."
 )
 CHAT_PROMPT = (
     " Сейчас режим «без проекта»: доступны только веб-поиск, загрузка страниц и чтение присланных файлов; "
@@ -88,6 +94,17 @@ class SessionManager:
         (cfg.state_dir / "chat").mkdir(exist_ok=True)
         (cfg.state_dir / "scratch").mkdir(exist_ok=True)
         (cfg.state_dir / "uploads").mkdir(exist_ok=True)
+        self.bin_dir = cfg.state_dir / "bin"
+        self._install_send_file()
+
+    def _install_send_file(self) -> None:
+        """Команда send-file для сессий Claude: папка bin добавляется в их PATH."""
+        self.bin_dir.mkdir(exist_ok=True)
+        script = self.bin_dir / "send-file"
+        script.write_text(
+            f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(send_file_module.__file__)} \"$@\"\n"
+        )
+        script.chmod(0o755)
 
     # ---------- публичное API ----------
 
@@ -280,6 +297,15 @@ class SessionManager:
             await self._drain(live, path)
             await self._flush_activity(live, force=True)
 
+    async def send_file(self, key: str, path: Path, caption: str = "") -> None:
+        """Файл от Claude (команда send-file) — в тред сессии, после уже написанного текста."""
+        live = self.live.get(key)
+        if not live:
+            raise RuntimeError("сессия не найдена")
+        live.last_active = time.monotonic()
+        await self.flush(key)
+        await self._m(live.rec).send_file(live.rec.conv, path, caption)
+
     def add_pending_reaction(self, key: str, message_id: int | str) -> None:
         live = self.live.get(key)
         if live:
@@ -329,13 +355,16 @@ class SessionManager:
         # серые подсказки следующего сообщения в поле ввода нам не нужны (и мешают проверке ввода);
         # флаг --prompt-suggestions в интерактивном режиме не срабатывает, поэтому env + настройка
         system = SYSTEM_PROMPT.format(platform=self._m(rec).name)
-        if rec.scratch:
-            system += SCRATCH_PROMPT
-        elif rec.project is None:
+        if rec.project is None and not rec.scratch:
             args += ["--restricted", "--tools", CHAT_TOOLS, "--strict-mcp-config", "--disable-slash-commands"]
             system += CHAT_PROMPT
+        else:
+            system += FILES_PROMPT  # в режиме «без проекта» терминала нет — send-file не вызвать
+            if rec.scratch:
+                system += SCRATCH_PROMPT
         args += ["--append-system-prompt", system, *self.cfg.extra_args]
-        return claude_shell(rec.cwd, args)
+        env = {"TGC_SOCKET": str(self.cfg.socket_path), "TGC_KEY": rec.key}
+        return claude_shell(rec.cwd, args, env=env, path_prepend=self.bin_dir)
 
     async def _launch(self, live: Live, resume: bool, prompt: str | None) -> None:
         rec = live.rec
@@ -540,12 +569,18 @@ async def wait_ready(name: str, timeout: float = 45) -> bool | None:
     return False
 
 
-def claude_shell(cwd: str, args: list[str]) -> str:
+def claude_shell(cwd: str, args: list[str], env: dict[str, str] | None = None, path_prepend: Path | None = None) -> str:
     """Команда для tmux: запуск claude в папке без переменных родительского Claude."""
     unset = " ".join(f"-u {v}" for v in _UNSET_VARS)
     # сервер tmux мог стартовать с другим окружением — часовой пояс передаём явно
     tz = f"TZ={shlex.quote(os.environ['TZ'])} " if os.environ.get("TZ") else ""
-    return f"cd {shlex.quote(cwd)} && exec env {unset} {tz}CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false {shlex.join(args)}"
+    extra = "".join(f"{k}={shlex.quote(v)} " for k, v in (env or {}).items())
+    if path_prepend:
+        extra += f'PATH={shlex.quote(str(path_prepend))}:"$PATH" '
+    return (
+        f"cd {shlex.quote(cwd)} && exec env {unset} {tz}{extra}"
+        f"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false {shlex.join(args)}"
+    )
 
 
 def _input_text(screen: str) -> str:

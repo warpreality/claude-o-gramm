@@ -6,19 +6,24 @@ import asyncio
 import html
 import logging
 import re
+from pathlib import Path
 
 from aiogram import Bot
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.methods import GetUpdates
 from aiogram.types import InlineKeyboardButton as Btn
-from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions, Message, ReactionTypeEmoji
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, LinkPreviewOptions, Message, ReactionTypeEmoji
 
 from .messenger import Buttons, Conv
 from .render import render
 
 log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+MB = 1024 * 1024
+FILE_LIMIT = 50 * MB  # больше бот в Telegram отправить не может
+PHOTO_LIMIT = 10 * MB
+PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def strip_tags(text: str) -> str:
@@ -117,6 +122,22 @@ class TelegramMessenger:
     async def send_markdown(self, conv: Conv, text: str) -> None:
         for chunk in render(text):
             await self.send(conv, chunk)
+
+    async def send_file(self, conv: Conv, path: Path, caption: str = "") -> None:
+        size = path.stat().st_size
+        if size > FILE_LIMIT:
+            raise ValueError(
+                f"файл {size / MB:.1f} МБ — Telegram не принимает от бота файлы больше 50 МБ; "
+                "сожми или раздели его"
+            )
+        kw = dict(message_thread_id=conv.thread or None, caption=caption[:1024] or None, parse_mode=None)
+        if path.suffix.lower() in PHOTO_EXT and size <= PHOTO_LIMIT:
+            try:
+                await _retry(self.bot.send_photo, conv.chat, FSInputFile(path), **kw)
+                return
+            except TelegramBadRequest as e:  # например, слишком вытянутая картинка — шлём файлом
+                log.info("картинка не ушла как фото (%s), отправляю файлом", e)
+        await _retry(self.bot.send_document, conv.chat, FSInputFile(path, filename=path.name), **kw)
 
     async def edit(self, conv: Conv, message_id: int, text: str, buttons: Buttons | None = None) -> None:
         await edit(self.bot, conv.chat, message_id, text, keyboard(buttons))
